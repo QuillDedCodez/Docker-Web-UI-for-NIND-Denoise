@@ -1,0 +1,39 @@
+# ── Version control ───────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── Dev / editor noise ────────────────────────────────────────────────────────
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── User data — never bake uploads or models into the image ──────────────────
+uploads/
+models/
+nind_denoise_models/
+state/
+dockerfiles/
+
+# ── Docs and scripts not needed at runtime ────────────────────────────────────
+*.md
+*.txt
+*.sh
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+# '**/' prefix is required — bare '__pycache__/' only matches at the root level.
+# Without '**/', app/routes/__pycache__/ and app/shared/__pycache__/ are
+# included in the build context, making it 236KB instead of ~500B.
+# A changed context invalidates BuildKit's upfront checksum, which cascades
+# into cache misses for every layer — including WORKDIR and RUN before COPY.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,118 @@
+services:
+
+  nind-manager:
+    build:
+      context: .
+      # Default: Widest NVIDIA GPU Compatability: ./dockerfiles/cu126/Dockerfile
+      # For Latest GPU: ./dockerfiles/cu128/Dockerfile
+      dockerfile: dockerfiles/cu126/Dockerfile
+      # Read the inline cache baked into the previous image on every build.
+      # Combined with ARG BUILDKIT_INLINE_CACHE=1 in the Dockerfile, this lets
+      # BuildKit reuse cached layers even after a daemon restart or WSL2 reboot.
+      cache_from:
+        - type=local,src=/tmp/nind-build-cache
+      cache_to:
+        - type=local,dest=/tmp/nind-build-cache,mode=max
+    container_name: nind_manager
+
+    ports:
+      - "10010:10010"
+
+    # ── Volumes ───────────────────────────────────────────────────────────────
+    #
+    # DEFAULT — single named volume
+    # ─────────────────────────────
+    # All data lives under /data inside one Docker-managed volume (nind_data).
+    # Docker initialises the volume from the image's /data directory on first
+    # run, so the nind user (UID 1000) already owns the volume root — no chown
+    # step needed.
+    #
+    # To find where Docker stores the volume on your host (WSL2 / Linux):
+    #   docker volume inspect nind-denoise-manager_nind_data
+    #
+    # To copy model weights into the volume without a bind mount:
+    #   docker cp ./my_model_folder nind_manager:/data/models/
+    #
+    volumes:
+      - ./uploads:/data 
+      - ./nind_denoise_models:/app/nind-denoise/models/nind_denoise
+
+    # ── ALTERNATIVE: replace the nind_data line above with individual bind ──
+    # mounts to have each folder visible as a regular directory on the host.
+    # Create the host folders before starting:
+    #   mkdir -p uploads/input uploads/output nind_denoise_models state
+    #
+    #   - ./uploads/input:/data/input
+    #   - ./uploads/output:/data/output
+    #   - ./nind_denoise_models:/data/models
+    #   - ./state:/data/state
+    #
+    # ── ALTERNATIVE: keep the named volume but override specific subfolders ──
+    # Docker honors the most specific mount — a bind mount layered on top of a
+    # named volume wins for that path only. The other subdirs stay inside the
+    # named volume. Useful if you only want, e.g., models or output on the host:
+    #
+    #   - nind_data:/data                              # named volume as base
+    #   - ./nind_denoise_models:/data/models           # models visible on host
+    #   - ./uploads/output:/data/output                # output visible on host
+    # ─────────────────────────────────────────────────────────────────────────
+
+    environment:
+      - INPUT_ROOT=/data/input
+      - OUTPUT_ROOT=/data/output
+      - MODEL_ROOT=/app/nind-denoise/models/nind_denoise
+      - STATE_DIR=/data/state
+      - NIND_SCRIPT=/app/nind-denoise/src/nind_denoise/denoise_image.py
+      - FLASK_PORT=10010
+      # ── VRAM management ──────────────────────────────────────────────────────
+      # Docker has no direct VRAM limit primitive.  The env var below instructs
+      # PyTorch's CUDA allocator to limit the maximum contiguous block it will
+      # reserve, which reduces peak VRAM fragmentation.
+      # Set to roughly half your GPU VRAM (in MB) as a starting point, e.g.:
+      #   4 GB GPU  → 2048    8 GB GPU  → 4096    16 GB GPU → 8192
+      # Comment out to let PyTorch manage VRAM automatically (default).
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:4096
+
+    deploy:
+      resources:
+        # ── RAM limits ───────────────────────────────────────────────────────
+        # Prevent the container from consuming all system RAM if a denoising
+        # batch is unexpectedly large.
+        # Adjust to match your host's available memory:
+        #   memory (hard limit) — container is OOM-killed if exceeded
+        #   memory reservation  — soft target; scheduler hint only
+        limits:
+          memory: 16G
+        reservations:
+          memory: 2G
+          # ── GPU (NVIDIA Container Toolkit required) ───────────────────────
+          # Linux:  install the toolkit then add "default-runtime": "nvidia" to
+          #         /etc/docker/daemon.json and restart dockerd.
+          #         https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+          # WSL2:   the toolkit ships with the CUDA driver — no extra steps.
+          #
+          # count: all  — expose every GPU to the container.
+          # Change to count: 1 (or device: ["0"]) to pin to a specific GPU.
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # ── Security hardening ────────────────────────────────────────────────────
+    # Prevent the process from gaining new privileges via setuid/setgid binaries.
+    security_opt:
+      - no-new-privileges:true
+
+    # Drop all Linux capabilities — the app needs only standard file I/O,
+    # network sockets on a high port (>1024), and GPU device access via the
+    # NVIDIA runtime.  None of those require any extra capability.
+    cap_drop:
+      - ALL
+
+    restart: unless-stopped
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+# Declared here so Docker tracks and names it under this project.
+# Remove this section entirely if you switch to all bind mounts above.
+volumes:
+  nind_data:

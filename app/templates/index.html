@@ -1,0 +1,3769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>NIND Denoise Manager</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+/* ── Reset & Variables ─────────────────────────────────────────────────────── */
+:root {
+  --bg:      #0c0e13;
+  --surface: #13161e;
+  --card:    #181c26;
+  --border:  #232838;
+  --accent:  #00c896;
+  --blue:    #3b9eff;
+  --warn:    #f5a623;
+  --danger:  #ff4d5e;
+  --muted:   #5a6380;
+  --text:    #dde3f0;
+  --font:    'Courier New', monospace;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 13px; }
+@media (min-width: 901px) { html, body { overflow: hidden; } }
+
+/* ── Layout ────────────────────────────────────────────────────────────────── */
+/* dvh = dynamic viewport height — excludes the browser chrome (address bar,
+   nav buttons). Plain 100vh on mobile equals the full screen height including
+   the browser UI, so the bottom of the app is hidden under it.
+   dvh updates as the chrome shows/hides (e.g. scrolling in Safari/Chrome).
+   Fallback to 100vh for browsers that don't support dvh (pre-2022 engines). */
+#app {
+  display: flex; flex-direction: column;
+  height: 100vh;     /* fallback for older browsers */
+  height: 100dvh;    /* preferred — tracks visible viewport only */
+  /* Safe-area insets: account for notch cutouts and home-indicator bar
+     in landscape orientation on phones with hardware bumps. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left:   env(safe-area-inset-left,   0px);
+  padding-right:  env(safe-area-inset-right,  0px);
+}
+
+/* ── Header ────────────────────────────────────────────────────────────────── */
+header {
+  display: flex; align-items: center; gap: 0;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.logo { padding: 0 18px; font-size: 14px; font-weight: bold; color: var(--accent); letter-spacing: 2px; white-space: nowrap; }
+.tabs { display: flex; }
+.tab {
+  padding: 13px 22px; cursor: pointer; border-bottom: 2px solid transparent;
+  color: var(--muted); font-size: 12px; letter-spacing: 1px; transition: all .15s;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--text); background: rgba(255,255,255,.03); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; padding: 0 14px; }
+.lock-badge { display: none; padding: 3px 10px; border-radius: 10px; font-size: 10px; font-weight: bold; letter-spacing: 1px; background: rgba(255,77,94,.15); color: var(--danger); border: 1px solid rgba(255,77,94,.3); }
+.lock-badge.show { display: inline-flex; align-items: center; gap: 5px; }
+.storage-info { font-size: 10px; color: var(--muted); }
+.clients-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 10px; font-size: 10px;
+  font-weight: bold; letter-spacing: 1px;
+  background: rgba(0,200,150,.08); color: var(--muted);
+  border: 1px solid rgba(0,200,150,.15); transition: all .3s;
+}
+.clients-badge.multi { color: var(--accent); border-color: rgba(0,200,150,.4); background: rgba(0,200,150,.12); }
+.clients-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); transition: background .3s; }
+.clients-badge.multi .clients-dot { background: var(--accent); animation: blink 2s infinite; }
+
+/* ── Tab panels ────────────────────────────────────────────────────────────── */
+.panel { display: none; flex: 1; overflow: hidden; }
+.panel.active { display: flex; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   APP 1 — FILE MANAGER
+═══════════════════════════════════════════════════════════════════════════ */
+#panel-fm { gap: 0; }
+.fm-pane {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+.fm-pane:last-child { border-right: none; }
+.pane-header {
+  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+  flex-wrap: wrap; row-gap: 5px;
+}
+/* Button groups inside pane headers.
+   Spacer (flex:1) pushes all groups to the right on the first row.
+   Group B gets margin-left:auto so it stays right-aligned if it wraps
+   to its own line. Group A has no margin-left:auto — that would split
+   free space between groups and centre Group A on wide screens.
+   justify-content:flex-end keeps individual buttons right-aligned
+   within the group when they wrap at extreme widths. */
+.pane-btn-group {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.pane-btn-group-b {
+  margin-left: auto;
+}
+/* Output section: flat buttons, no groups, always right-aligned.
+   margin-left:auto right-anchors the block; justify-content:flex-end
+   keeps every wrapped row right-aligned too. */
+.pane-btns-end {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+.pane-label { font-size: 10px; letter-spacing: 2px; font-weight: bold; }
+.pane-storage { font-size: 10px; color: var(--muted); margin-left: 4px; }
+#upload-dest-hint {
+  font-size: 10px; white-space: nowrap; max-width: 160px;
+  overflow: hidden; text-overflow: ellipsis;
+  padding: 2px 7px; border-radius: 4px;
+  display: none;   /* hidden when no folder selected */
+}
+#upload-dest-hint.hint-single {
+  display: inline-block;
+  color: var(--accent); background: rgba(0,200,150,.1);
+  border: 1px solid rgba(0,200,150,.3);
+}
+#upload-dest-hint.hint-multi {
+  display: inline-block;
+  color: #f5a623; background: rgba(245,166,35,.1);
+  border: 1px solid rgba(245,166,35,.4);
+}
+.spacer { flex: 1; }
+.pane-tree { flex: 1; overflow-y: auto; padding: 4px 0; min-height: 120px; }
+.pane-tree.sel-locked { pointer-events: none; opacity: .5; }
+.tree-empty { padding: 32px; text-align: center; color: var(--muted); font-size: 12px; }
+
+/* tree rows */
+.trow {
+  display: flex; align-items: center; gap: 5px;
+  padding: 2px 10px; cursor: pointer; user-select: none;
+  min-height: 28px;   /* bigger tap target */
+}
+.trow:hover { background: rgba(255,255,255,.04); }
+/* Base selection highlight — applied to the "owner" level only */
+.trow.sel        { background: rgba(0,200,150,.13); }
+/* Child highlights: progressively more transparent per nesting depth */
+.trow.sel-child1 { background: rgba(0,200,150,.09); }
+.trow.sel-child2 { background: rgba(0,200,150,.06); }
+.trow.sel-child3 { background: rgba(0,200,150,.04); }
+.tindent { display: inline-block; width: 16px; flex-shrink: 0; }
+.tcheck {
+  /* Larger checkbox — 18px visual, 28px hit area via padding trick */
+  width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 3px;
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; cursor: pointer; transition: all .1s;
+  /* invisible placeholder keeps layout stable when checkbox is hidden */
+}
+.tcheck.on  { background: var(--accent);  border-color: var(--accent);  color: #000; }
+.tcheck.par { background: var(--warn);    border-color: var(--warn);    color: #000; }
+/* When a row is covered by a parent selection, hide the checkbox visually
+   but keep the placeholder so indentation stays consistent */
+.tcheck.hidden { visibility: hidden; pointer-events: none; }
+.ticon { width: 14px; text-align: center; flex-shrink: 0; }
+.tname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tsize { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.ttiff { color: var(--accent); font-size: 9px; flex-shrink: 0; }
+
+/* ── Buttons ────────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border);
+  background: transparent; color: var(--text); cursor: pointer;
+  font-family: var(--font); font-size: 11px; transition: all .15s; white-space: nowrap;
+}
+.btn:hover { background: var(--border); }
+.btn:disabled { opacity: .35; cursor: not-allowed; }
+.btn-a  { border-color: var(--accent); color: var(--accent); }
+.btn-a:hover  { background: var(--accent); color: #000; }
+.btn-b  { border-color: var(--blue); color: var(--blue); }
+.btn-b:hover  { background: var(--blue); color: #000; }
+.btn-d  { border-color: var(--danger); color: var(--danger); }
+.btn-d:hover  { background: var(--danger); color: #fff; }
+.btn-lg { padding: 11px 24px; font-size: 15px; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   APP 2 — SELECTOR
+═══════════════════════════════════════════════════════════════════════════ */
+#panel-sel { flex-direction: row; }
+.sel-left  { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+.sel-mid   { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; overflow-y: auto; border-right: 1px solid var(--border); background: var(--surface); }
+.sel-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.sel-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.sel-section h3 { font-size: 10px; letter-spacing: 2px; color: var(--accent); margin-bottom: 10px; }
+.field { margin-bottom: 8px; }
+.field label { display: block; font-size: 10px; color: var(--muted); margin-bottom: 3px; letter-spacing: 1px; }
+.field input, .field select {
+  width: 100%; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 8px; color: var(--text);
+  font-family: var(--font); font-size: 11px;
+}
+.field select option { background: var(--card); }
+
+/* network tags */
+.tag-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.ntag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; border-radius: 10px; font-size: 11px; cursor: pointer;
+  background: var(--border); border: 1px solid transparent; transition: all .15s;
+}
+.ntag.active { background: rgba(0,200,150,.15); border-color: var(--accent); color: var(--accent); }
+.ntag .ndel       { color: var(--danger); font-size: 10px; cursor: pointer; }
+.ntag .ndel:hover { color: #fff; }
+.ntag.unet-locked { opacity: .85; cursor: default; }
+.ntag .nlock      { font-size: 9px; margin-left: 2px; cursor: default; }
+
+/* skip warning */
+.skip-warn { display: none; padding: 6px 10px; background: rgba(245,166,35,.1); border: 1px solid rgba(245,166,35,.3); border-radius: 4px; color: var(--warn); font-size: 11px; margin-bottom: 8px; }
+.skip-warn.show { display: block; }
+
+/* command list */
+.cmd-list { flex: 1; overflow-y: auto; }
+.cmd-item { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.cmd-fname { color: var(--blue); font-size: 11px; margin-bottom: 2px; }
+.cmd-str   { color: var(--muted); font-size: 9px; word-break: break-all; }
+.cmd-status-pill { font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: bold; margin-left: 4px; }
+.st-pending { background: rgba(245,166,35,.2); color: var(--warn); }
+.st-running { background: rgba(59,158,255,.2); color: var(--blue); animation: blink 1.2s infinite; }
+.st-done    { background: rgba(0,200,150,.2);  color: var(--accent); }
+.st-failed  { background: rgba(255,77,94,.2);  color: var(--danger); }
+.st-skipped { background: rgba(90,99,128,.2);  color: var(--muted); }
+.cmd-history-hdr {
+  padding: 5px 10px; font-size: 9px; letter-spacing: 2px; color: var(--muted);
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  border-top: 2px solid var(--border); display: flex; align-items: center; gap: 8px;
+}
+.cmd-history-hdr span { opacity: .6; }
+
+/* stats bar */
+.statsbar { display: flex; gap: 16px; padding: 7px 12px; background: var(--surface); border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.statsbar b { color: var(--text); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   APP 3 — WORKER
+═══════════════════════════════════════════════════════════════════════════ */
+#panel-wk { flex-direction: column; overflow-y: auto; padding: 16px; gap: 14px; }
+
+/* control bar */
+.ctrl-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 16px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; flex-shrink: 0;
+}
+.ctrl-group { display: flex; align-items: center; gap: 8px; }
+.ctrl-group label { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+.ctrl-group input[type=number] {
+  width: 60px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 7px; color: var(--text);
+  font-family: var(--font); font-size: 13px; text-align: center;
+}
+.ctrl-group input[type=checkbox] { width: 14px; height: 14px; cursor: pointer; }
+.session-pill { padding: 4px 12px; border-radius: 12px; font-size: 10px; font-weight: bold; letter-spacing: 1px; }
+.sp-idle    { background: rgba(90,99,128,.2); color: var(--muted); }
+.sp-running { background: rgba(0,200,150,.15); color: var(--accent); animation: blink 1.4s infinite; }
+.sp-done    { background: rgba(0,200,150,.2);  color: var(--accent); }
+
+/* VRAM / RAM bars */
+.vram-bar { padding: 8px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.vram-item { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.vram-name { color: var(--muted); }
+.vram-track { width: 120px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.vram-fill  { height: 100%; background: var(--blue); border-radius: 3px; transition: width .5s; }
+.vram-fill.ram { background: var(--accent); }
+.vram-val   { color: var(--text); min-width: 80px; }
+.vram-divider { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
+
+/* workers grid — left-to-right columns, each column = one worker slot */
+.workers-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+/* worker slot = card on top, terminal below */
+.wslot { display: flex; flex-direction: column; }
+
+/* card */
+.wcard {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px; transition: border-color .2s;
+}
+.wslot.has-term .wcard { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.wcard.idle     { border-color: var(--border); }
+.wcard.queued   { border-color: var(--border); }
+.wcard.running  { border-color: var(--accent); }
+.wcard.done     { border-color: rgba(0,200,150,.35); }
+.wcard.failed   { border-color: var(--danger); }
+.wcard.cancelled{ border-color: var(--warn); }
+.wcard-title { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.wcard-title h3 { font-size: 12px; letter-spacing: 1px; }
+.wbadge { font-size: 9px; padding: 2px 7px; border-radius: 3px; font-weight: bold; letter-spacing: 1px; }
+.wb-idle     { background: rgba(90,99,128,.15);   color: var(--muted); }
+.wb-queued   { background: rgba(90,99,128,.15);   color: var(--muted); }
+.wb-running  { background: rgba(0,200,150,.15);   color: var(--accent); }
+.wb-done     { background: rgba(0,200,150,.12);   color: var(--accent); }
+.wb-failed   { background: rgba(255,77,94,.15);   color: var(--danger); }
+.wb-cancelled{ background: rgba(245,166,35,.12);  color: var(--warn); }
+.wcard-prog  { height: 3px; background: var(--border); border-radius: 2px; margin-bottom: 10px; overflow: hidden; }
+.wcard-progf { height: 100%; background: var(--accent); transition: width .4s; }
+.wstats { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.wstat { background: var(--bg); border-radius: 4px; padding: 5px 8px; }
+.wstat-lbl { font-size: 9px; color: var(--muted); letter-spacing: 1px; margin-bottom: 1px; }
+.wstat-val { font-size: 12px; }
+.wcurrent { font-size: 10px; color: var(--muted); margin-top: 7px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 14px; }
+
+/* per-worker terminal — hidden until process log checkbox is on */
+.wslot-term {
+  display: none;
+  flex-direction: column;
+  background: #0a0c10;
+  border: 1px solid var(--border); border-top: none;
+  border-bottom-left-radius: 8px; border-bottom-right-radius: 8px;
+  overflow: hidden;
+}
+.wslot-term.visible { display: flex; }
+.wslot-term-hdr {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.wslot-term-hdr span { font-size: 10px; letter-spacing: 1.5px; color: var(--accent); }
+.wslot-term-body {
+  height: 160px; overflow-y: auto;
+  padding: 6px 10px; font-size: 11px;
+  font-family: 'Courier New', monospace; line-height: 1.5;
+}
+.term-line { white-space: pre-wrap; word-break: break-all; margin-bottom: 1px; }
+.term-line.err  { color: var(--danger); }
+.term-line.info { color: var(--muted); }
+.term-line.ok   { color: var(--accent); }
+.term-line.dbg  { color: #7a8aaa; }
+
+/* report — always visible, placeholder until session completes */
+.report-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.report-box h2 { color: var(--accent); font-size: 11px; letter-spacing: 2px; margin-bottom: 12px; }
+.report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+.rstat { background: var(--bg); border-radius: 6px; padding: 12px; text-align: center; }
+.rstat-val { font-size: 22px; color: var(--accent); }
+.rstat-lbl { font-size: 9px; color: var(--muted); letter-spacing: 1px; margin-top: 2px; }
+.rstat-val.dim { color: var(--muted); font-size: 16px; }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE — portrait / narrow screens
+   Breakpoints:
+     ≤ 900px  tablet / landscape phone  → selector stacks, fm panes stack
+     ≤ 600px  portrait phone            → header wraps, single-column everything
+══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Allow scrolling on narrow viewports ─────────────────────────────────── */
+@media (max-width: 900px) {
+  html, body { overflow: auto; height: auto; }
+  #app { height: auto; min-height: 100vh; min-height: 100dvh; }
+  .panel { overflow: visible; }
+  .panel.active { flex-direction: column; }
+
+  /* ── File Manager: stack input / output panes vertically ─────────────── */
+  #panel-fm { flex-direction: column; }
+  .fm-pane {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    min-height: 280px;
+  }
+  .fm-pane:last-child { border-bottom: none; }
+
+  /* ── Pane header buttons: allow wrapping ─────────────────────────────── */
+
+  /* ── Selector: stack left / mid / right vertically ───────────────────── */
+  #panel-sel { flex-direction: column; overflow-y: auto; }
+  .sel-left  { width: 100%; border-right: none; border-bottom: 1px solid var(--border); min-height: 260px; overflow: visible; }
+  .sel-mid   { width: 100%; border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
+  .sel-right { width: 100%; overflow: visible; min-height: 200px; }
+
+  /* ── Worker: single-column grid ──────────────────────────────────────── */
+  #panel-wk { overflow-y: auto; }
+  .workers-grid { grid-template-columns: 1fr; }
+  .report-grid  { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ── ≤ 600px: phone portrait ──────────────────────────────────────────────── */
+@media (max-width: 600px) {
+
+  /* Header: logo on its own row, tabs wrap below it */
+  header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .logo {
+    width: 100%;
+    padding: 10px 14px 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs {
+    flex-wrap: wrap;
+    width: 100%;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    padding: 9px 14px;
+    font-size: 11px;
+    white-space: nowrap;
+    border-bottom: none;
+    border-right: 1px solid var(--border);
+  }
+  .tab.active {
+    border-bottom: 2px solid var(--accent);
+    margin-bottom: -1px;   /* sit flush on the border */
+  }
+  .tab:last-child { border-right: none; }
+  .header-right {
+    width: 100%;
+    padding: 6px 14px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .storage-info { font-size: 9px; }
+
+  /* Panels need a bit of breathing room at the top */
+  .panel.active { padding-top: 0; }
+
+  /* File Manager panes taller on phone */
+  .fm-pane { min-height: 240px; }
+
+  .pane-label  { font-size: 10px; }
+
+  /* Selector: mid panel no horizontal scroll */
+  .sel-mid { overflow-x: hidden; }
+
+  /* Worker ctrl-bar: stack groups */
+  .ctrl-bar { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .ctrl-bar .spacer { display: none; }
+  .btn-lg { width: 100%; justify-content: center; }
+
+  /* VRAM/RAM bar: stack items vertically */
+  .vram-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .vram-track { width: 100%; }
+  .vram-item  { width: 100%; }
+  .vram-divider { width: 100%; height: 1px; }
+
+  /* Report grid: 2 columns on phone */
+  .report-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* Worker terminal height shorter on phone */
+  .wslot-term-body { height: 120px; }
+
+  /* Selector stats bar wraps */
+  .statsbar { flex-wrap: wrap; gap: 8px; }
+}
+
+/* ── Mobile landscape — browser chrome takes extra vertical space ────────────
+   Compact the header so panels can breathe. Safe-area insets already applied
+   to #app above; this just trims unnecessary padding/font-size in header tabs. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .tab { padding: 7px 12px; font-size: 10px; }
+  .logo { padding: 0 12px; font-size: 12px; }
+  .header-right { padding: 0 10px; }
+  /* Tighten pane headers so more tree content is visible */
+  .pane-header { padding: 5px 10px; }
+  /* Worker terminal even shorter in landscape */
+  .wslot-term-body { height: 90px; }
+  /* fm-pane min-height: shorter so both panes fit without excessive scroll */
+  .fm-pane { min-height: 160px; }
+  .sel-left { min-height: 160px; }
+}
+
+/* ── Upload Progress Panel ──────────────────────────────────────────────────── */
+/* ── Transfer Panel (uploads + downloads stacked) ───────────────────────── */
+#xfer-panel {
+  position: fixed;
+  bottom: max(56px, calc(env(safe-area-inset-bottom, 0px) + 48px));
+  right: max(14px, env(safe-area-inset-right, 14px));
+  width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.45);
+  z-index: 998;
+  display: none;
+  flex-direction: column;
+  font-size: 11px;
+  max-height: calc(100dvh - 80px);
+  overflow: hidden;
+}
+#xfer-panel.visible { display: flex; }
+#xfer-panel-hdr {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+#xfer-panel-title {
+  flex: 1; font-weight: bold; letter-spacing: .6px;
+  color: var(--muted); font-size: 10px;
+}
+.xfer-ph-btn {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 11px; padding: 2px 4px;
+  border-radius: 3px; line-height: 1;
+}
+.xfer-ph-btn:hover { color: var(--text); background: var(--border); }
+#xfer-batches {
+  overflow-y: auto; flex: 1;
+  display: flex; flex-direction: column; gap: 0;
+}
+/* ── Batch card ── */
+.xb {
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.xb:last-child { border-bottom: none; }
+.xb-hdr {
+  display: flex; align-items: center; gap: 5px;
+  padding: 7px 8px 7px 10px;
+  cursor: default; user-select: none;
+}
+.xb-icon { font-size: 13px; flex-shrink: 0; }
+/* .xb-meta: flex column wrapping title + optional subtitle (remote badge) */
+.xb-meta {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.xb-title {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; font-weight: bold;
+}
+/* Subtitle line shown on remote-observer cards only */
+.xb-subtitle {
+  font-size: 9px; color: var(--muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* Real-time combined upload speed (batch header only) */
+.xb-speed {
+  font-size: 10px; color: var(--muted); min-width: 60px; text-align: right;
+  flex-shrink: 0; font-variant-numeric: tabular-nums;
+}
+.xb-bar  { width: 52px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+.xb-fill { height: 100%; border-radius: 2px; transition: width .2s; width: 0%; }
+.xb-fill.up      { background: var(--accent); }
+.xb-fill.dl      { background: var(--blue); }
+.xb-fill.err     { background: #e55; }
+.xb-fill.pulse   { background: var(--blue); animation: xb-pulse 1.2s ease-in-out infinite; }
+/* dual-fill: background gradient is set directly via inline style.background by JS */
+.xb-fill.dual-fill, .xbf-fill.dual-fill { /* marker class only — background set inline */ }
+@keyframes xb-pulse {
+  0%,100% { opacity: 1; } 50% { opacity: .35; }
+}
+.xb-btn  {
+  background: none; border: none; cursor: pointer; font-size: 11px;
+  color: var(--muted); padding: 2px 4px; border-radius: 3px; line-height: 1; flex-shrink: 0;
+}
+.xb-btn:hover { color: var(--text); background: var(--border); }
+.xb-btn.cancel:hover { color: #e55; }
+.xb-btn.close:hover  { color: var(--text); }
+/* Expanded file list */
+.xb-files {
+  display: none;
+  flex-direction: column;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 3px 0 6px;
+  border-top: 1px solid var(--border);
+  background: rgba(0,0,0,.12);
+}
+.xb.open .xb-files { display: flex; }
+.xb-toggle { transition: transform .18s; }
+.xb.open .xb-toggle { transform: rotate(180deg); }
+/* File/folder rows inside a batch */
+/* Unified tree row — folders and files share the same structure */
+.xbf-row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 6px 2px 10px;
+  min-height: 22px;
+}
+.xbf-row:hover .xbf-cancel { opacity: 1; pointer-events: auto; }
+.xbf-indent  { display: inline-block; width: 12px; flex-shrink: 0; }
+.xbf-icon    { font-size: 10px; flex-shrink: 0; }
+.xbf-icon.folder { color: var(--warn); }
+.xbf-icon.file   { color: var(--muted); }
+.xbf-name    { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+               font-size: 10px; }
+.xbf-name.folder { color: var(--warn); font-weight: bold; }
+.xbf-name.file   { color: var(--text); }
+.xbf-track   { width: 40px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+.xbf-fill    { height: 100%; border-radius: 2px; transition: width .15s; width: 0%; }
+.xbf-fill.up  { background: var(--accent); }
+.xbf-fill.dl  { background: var(--blue); }
+.xbf-fill.err { background: #e55; }
+/* Speed shown left of the bar on file rows while uploading; hidden once done/cancelled */
+.xbf-speed   { font-size: 10px; color: var(--muted); flex-shrink: 0; min-width: 54px;
+               text-align: right; font-variant-numeric: tabular-nums; }
+/* Status right of the bar: shows % during transfer, ✓/✗/– after */
+.xbf-status  { font-size: 10px; color: var(--muted); flex-shrink: 0; min-width: 28px; text-align: right; }
+.xb-pct      { font-size: 10px; color: var(--muted); min-width: 36px; text-align: right; flex-shrink: 0; }
+/* Per-item cancel — hidden until row hover */
+.xbf-cancel {
+  opacity: 0; pointer-events: none;
+  background: none; border: none; cursor: pointer;
+  font-size: 10px; color: var(--muted); padding: 0 2px;
+  line-height: 1; border-radius: 2px; flex-shrink: 0;
+  transition: opacity .1s;
+}
+.xbf-cancel:hover { color: #e55; }
+.xbf-cancel.remote { display: none; }
+
+#toast {
+  position: fixed;
+  bottom: max(20px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+  right: max(20px, env(safe-area-inset-right, 20px));
+  z-index: 999;
+  background: var(--surface); border: 1px solid var(--accent);
+  padding: 9px 16px; border-radius: 6px; font-size: 12px;
+  opacity: 0; transition: opacity .25s; pointer-events: none;
+}
+#toast.show { opacity: 1; }
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ══ HEADER ════════════════════════════════════════════════════════════════ -->
+<header>
+  <div class="logo">◈ NIND</div>
+  <div class="tabs">
+    <div class="tab active" data-tab="fm">① File Manager</div>
+    <div class="tab"        data-tab="sel">② Selector</div>
+    <div class="tab"        data-tab="wk">③ Worker</div>
+  </div>
+  <div class="header-right">
+    <div class="clients-badge" id="clients-badge" title="Connected clients">
+      <div class="clients-dot"></div>
+      <span id="clients-count">1</span>
+    </div>
+    <div class="lock-badge" id="lock-badge">⬛ WORKER RUNNING – UPLOADS LOCKED</div>
+    <button class="btn btn-d" id="btn-force-unlock" style="display:none;font-size:10px;padding:3px 9px"
+            onclick="forceUnlock()" title="Clear a stale lock left by a crashed session">⚠ Force Unlock</button>
+    <div class="storage-info" id="header-storage"></div>
+  </div>
+</header>
+
+<!-- ══ APP 1 — FILE MANAGER ══════════════════════════════════════════════════ -->
+<div class="panel active" id="panel-fm">
+
+  <!-- INPUT pane -->
+  <div class="fm-pane">
+    <div class="pane-header">
+      <span class="pane-label" style="color:var(--accent)">INPUT</span>
+      <span class="pane-storage" id="fm-input-size"></span>
+      <div class="spacer"></div>
+      <div class="pane-btn-group pane-btn-group-a">
+        <button class="btn btn-a" id="btn-upload-files"   onclick="triggerUploadFiles()">⇑ Files</button>
+        <button class="btn btn-a" id="btn-upload-folders" onclick="triggerUploadFolders()">⇑ Folders</button>
+        <span id="upload-dest-hint"></span>
+        <input type="file" id="file-input"   multiple                 style="display:none" onchange="doUpload(this)">
+        <input type="file" id="folder-input" multiple webkitdirectory style="display:none" onchange="doUpload(this)">
+        <button class="btn" id="btn-mkdir" onclick="mkdirInput()">+ Folder</button>
+      </div>
+      <div class="pane-btn-group pane-btn-group-b">
+        <button class="btn btn-b" onclick="downloadSection('input')">⇓ Download</button>
+        <button class="btn btn-d" id="btn-del-input" onclick="deleteSelected()">✕ Delete</button>
+      </div>
+    </div>
+    <div class="pane-tree" id="tree-input"
+         ondragover="ev.preventDefault();this.style.background='rgba(0,200,150,.04)'"
+         ondragleave="this.style.background=''"
+         ondrop="onDrop(event)"></div>
+  </div>
+
+  <!-- OUTPUT pane -->
+  <div class="fm-pane">
+    <div class="pane-header">
+      <span class="pane-label" style="color:var(--blue)">OUTPUT</span>
+      <span class="pane-storage" id="fm-output-size"></span>
+      <div class="pane-btns-end">
+        <button class="btn btn-b" onclick="downloadSection('output')">⇓ Download</button>
+        <button class="btn btn-d" id="btn-del-output" onclick="deleteOutputSelected()">✕ Delete</button>
+      </div>
+    </div>
+    <div class="pane-tree" id="tree-output"></div>
+  </div>
+</div>
+
+<!-- ══ APP 2 — SELECTOR ══════════════════════════════════════════════════════ -->
+<div class="panel" id="panel-sel">
+
+  <!-- Left: input tree with checkboxes -->
+  <div class="sel-left">
+    <div class="pane-header">
+      <span class="pane-label" style="color:var(--accent)">SELECT FILES</span>
+      <div class="pane-btns-end">
+        <button class="btn" id="btn-sel-all"  onclick="selAll()">☑ All</button>
+        <button class="btn" id="btn-sel-none" onclick="selNone()">☐ None</button>
+      </div>
+    </div>
+    <div class="pane-tree" id="tree-sel"></div>
+    <div class="statsbar">
+      <span>Sel: <b id="n-sel">0</b></span>
+      <span>IMG: <b id="n-tiff">0</b></span>
+      <span>Skipped: <b id="n-skip">0</b></span>
+      <span>Total: <b id="n-total">0</b></span>
+    </div>
+  </div>
+
+  <!-- Mid: settings -->
+  <div class="sel-mid">
+
+    <div class="sel-section">
+      <h3>⚡ NETWORK</h3>
+      <div class="tag-row" id="network-tags"></div>
+      <div style="display:flex;gap:5px">
+        <input type="text" id="new-net" placeholder="Add profile…"
+               style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 7px;color:var(--text);font-family:var(--font);font-size:11px">
+        <button class="btn btn-a" onclick="addNetwork()">+</button>
+      </div>
+    </div>
+
+
+    <div class="sel-section">
+      <h3>◫ TILE SIZE</h3>
+      <!-- Toggle row -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="chk-tile" style="width:14px;height:14px;cursor:pointer"
+               onchange="onTileToggle()">
+        <label for="chk-tile" style="font-size:11px;color:var(--text);cursor:pointer;letter-spacing:0">
+          Override tile size (adds <code style="color:var(--accent)">--cs</code> / <code style="color:var(--accent)">--ucs</code> to commands)
+        </label>
+      </div>
+      <!-- Inputs — hidden until checkbox is on -->
+      <div id="tile-inputs" style="display:none">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.6">
+          <code style="color:var(--text)">--cs</code> tile (crop) size fed to the network.<br>
+          <code style="color:var(--text)">--ucs</code> useful tile size — kept smaller than cs to avoid seam artifacts.
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div class="field" style="margin-bottom:0">
+            <label>cs — crop size</label>
+            <input type="number" id="inp-cs" value="440" min="64" step="8"
+                   style="width:100%;background:var(--bg);border:1px solid var(--border);
+                          border-radius:4px;padding:5px 8px;color:var(--text);
+                          font-family:var(--font);font-size:12px;text-align:center"
+                   onchange="onCsUcsChange()">
+            <div id="cs-default-hint" style="font-size:9px;color:var(--muted);margin-top:2px;text-align:center"></div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>ucs — useful size</label>
+            <input type="number" id="inp-ucs" value="320" min="32" step="8"
+                   style="width:100%;background:var(--bg);border:1px solid var(--border);
+                          border-radius:4px;padding:5px 8px;color:var(--text);
+                          font-family:var(--font);font-size:12px;text-align:center"
+                   onchange="onCsUcsChange()">
+            <div id="ucs-default-hint" style="font-size:9px;color:var(--muted);margin-top:2px;text-align:center"></div>
+          </div>
+        </div>
+        <div id="ucs-ratio-hint" style="margin-top:6px;font-size:10px;color:var(--muted)"></div>
+      </div>
+    </div>
+
+    <div class="sel-section">
+      <h3>◎ MODEL</h3>
+      <div class="field">
+        <label>Detected models</label>
+        <select id="model-sel" onchange="onModelChange()"></select>
+      </div>
+      <div class="field">
+        <label>Model path (host)</label>
+        <input type="text" id="model-path" placeholder="select a model above" readonly
+               style="color:var(--muted);cursor:default">
+      </div>
+      <div class="skip-warn" id="model-warn">
+        ⚠ --model_path is required. Select a .pt / .pth model above before generating commands.
+      </div>
+      <!-- Folder name hint — shows the full training command string -->
+      <div id="model-folder-hint" style="display:none;margin-top:6px;font-size:10px;
+           color:var(--muted);word-break:break-all;line-height:1.5;
+           background:var(--surface);border:1px solid var(--border);
+           border-radius:4px;padding:6px 8px;"></div>
+      <!-- Shown when parsed network differs from selected network -->
+      <div class="skip-warn" id="model-network-warn" style="margin-top:6px"></div>
+    </div>
+
+    <div class="sel-section">
+      <h3>◧ DEVICE</h3>
+      <div class="field">
+        <label>Compute device</label>
+        <select id="device-sel">
+          <option value="0">GPU (cuda:0)</option>
+          <option value="-1">CPU</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="sel-section">
+      <h3>⇄ SUFFIXES</h3>
+      <div class="field">
+        <label>Folder suffix</label>
+        <input type="text" id="folder-suffix" value="_nind">
+      </div>
+      <div class="field">
+        <label>File suffix (supported formats only)</label>
+        <input type="text" id="file-suffix" value="_nindimg">
+      </div>
+      <div class="field">
+        <label>Active image formats <span style="font-size:9px;color:var(--border)">(edit SUPPORTED_EXTS in utils.py)</span></label>
+        <div id="supported-exts-display"
+             style="background:var(--bg);border:1px solid var(--border);border-radius:4px;
+                    padding:5px 8px;font-size:11px;color:var(--muted);line-height:1.8;
+                    word-break:break-all">
+          …
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Advanced Parameters ─────────────────────────────────────────── -->
+    <div class="sel-section" style="padding:0">
+
+      <!-- Collapsible header -->
+      <div id="adv-toggle"
+           onclick="toggleAdvanced()"
+           style="display:flex;align-items:center;gap:8px;padding:12px 14px;
+                  cursor:pointer;user-select:none;
+                  border-bottom:1px solid transparent;transition:border-color .15s">
+        <span id="adv-arrow" style="color:var(--muted);font-size:11px;transition:transform .2s">▶</span>
+        <h3 style="margin:0;color:var(--muted)">⚙ ADVANCED PARAMETERS</h3>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted);letter-spacing:1px">
+          blank = use script default
+        </span>
+      </div>
+
+      <!-- Collapsible body -->
+      <div id="adv-body" style="display:none;padding:12px 14px;border-top:1px solid var(--border)">
+
+        <!-- overlap -->
+        <div class="field">
+          <label>-ol &nbsp;--overlap &nbsp;<span style="color:var(--border)">int — script default: 6</span></label>
+          <input type="number" id="adv-overlap" placeholder="6 (default)" min="0"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);
+                        border-radius:4px;padding:5px 8px;color:var(--text);
+                        font-family:var(--font);font-size:11px"
+                 onchange="saveSettingsQuiet()">
+          <div style="font-size:9px;color:var(--muted);margin-top:2px;line-height:1.4">
+            Merge crops with this overlap. Reduces grid artifacts; smaller = sharper but more seams.
+          </div>
+        </div>
+
+        <!-- batch_size -->
+        <div class="field">
+          <label>-b &nbsp;--batch_size &nbsp;<span style="color:var(--border)">int — script default: 1</span></label>
+          <input type="number" id="adv-batch" placeholder="1 (default)" min="1"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);
+                        border-radius:4px;padding:5px 8px;color:var(--text);
+                        font-family:var(--font);font-size:11px"
+                 onchange="saveSettingsQuiet()">
+          <div style="font-size:9px;color:var(--warn);margin-top:2px;line-height:1.4">
+            ⚠ Values &gt;1 are broken in the current upstream source.
+          </div>
+        </div>
+
+        <!-- exif_method -->
+        <div class="field">
+          <label>--exif_method &nbsp;<span style="color:var(--border)">script default: piexif</span></label>
+          <select id="adv-exif"
+                  style="width:100%;background:var(--bg);border:1px solid var(--border);
+                         border-radius:4px;padding:5px 8px;color:var(--text);
+                         font-family:var(--font);font-size:11px"
+                  onchange="saveSettingsQuiet()">
+            <option value="">— use script default (piexif) —</option>
+            <option value="piexif">piexif</option>
+            <option value="exiftool">exiftool</option>
+            <option value="noexif">noexif</option>
+          </select>
+        </div>
+
+        <!-- model_parameters -->
+        <div class="field">
+          <label>--model_parameters &nbsp;<span style="color:var(--border)">string</span></label>
+          <input type="text" id="adv-model-params" placeholder="e.g. dropout=0.1,layers=4"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);
+                        border-radius:4px;padding:5px 8px;color:var(--text);
+                        font-family:var(--font);font-size:11px"
+                 onchange="saveSettingsQuiet()">
+          <div style="font-size:9px;color:var(--muted);margin-top:2px">Format: param1=val1,param2=val2</div>
+        </div>
+
+        <!-- max_subpixels -->
+        <div class="field">
+          <label>--max_subpixels &nbsp;<span style="color:var(--border)">int</span></label>
+          <input type="number" id="adv-maxpx" placeholder="blank = no limit" min="1"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);
+                        border-radius:4px;padding:5px 8px;color:var(--text);
+                        font-family:var(--font);font-size:11px"
+                 onchange="saveSettingsQuiet()">
+          <div style="font-size:9px;color:var(--muted);margin-top:2px">Abort processing if image exceeds this many sub-pixels.</div>
+        </div>
+
+        <!-- whole_image + pad -->
+        <div class="field" style="margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="adv-whole" style="width:14px;height:14px;cursor:pointer"
+                   onchange="onWholeImageChange()">
+            <label for="adv-whole" style="font-size:11px;color:var(--text);cursor:pointer;letter-spacing:0">
+              --whole_image &nbsp;<span style="color:var(--muted);font-size:10px">ignore cs/ucs, denoise full image in one pass</span>
+            </label>
+          </div>
+        </div>
+        <div class="field" id="adv-pad-row" style="display:none;padding-left:22px">
+          <label>--pad &nbsp;<span style="color:var(--border)">int — padding per side (whole_image only)</span></label>
+          <input type="number" id="adv-pad" placeholder="blank = script default" min="0"
+                 style="width:100%;background:var(--bg);border:1px solid var(--border);
+                        border-radius:4px;padding:5px 8px;color:var(--text);
+                        font-family:var(--font);font-size:11px"
+                 onchange="saveSettingsQuiet()">
+        </div>
+
+        <!-- debug -->
+        <div class="field" style="margin-bottom:0">
+          <div style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="adv-debug" style="width:14px;height:14px;cursor:pointer"
+                   onchange="saveSettingsQuiet()">
+            <label for="adv-debug" style="font-size:11px;color:var(--text);cursor:pointer;letter-spacing:0">
+              --debug &nbsp;<span style="color:var(--muted);font-size:10px">store all intermediate crops in ./dbg, verbose output</span>
+            </label>
+          </div>
+        </div>
+
+      </div><!-- /#adv-body -->
+    </div><!-- advanced section -->
+
+    <!-- ── Command Folder Name (collapsible) ──────────────────────────────── -->
+    <div class="sel-section" style="padding:0">
+
+      <!-- Collapsible header -->
+      <div id="ovr-toggle"
+           onclick="toggleOverride()"
+           style="display:flex;align-items:center;gap:8px;padding:12px 14px;
+                  cursor:pointer;user-select:none;
+                  border-bottom:1px solid transparent;transition:border-color .15s">
+        <span id="ovr-arrow" style="color:var(--muted);font-size:11px;transition:transform .2s">▶</span>
+        <h3 style="margin:0;color:var(--muted)">📁 COMMAND FOLDER NAME</h3>
+        <span id="ovr-indicator" style="margin-left:auto;font-size:9px;
+              letter-spacing:1px;display:none;
+              color:var(--warn)">OVERRIDE ACTIVE</span>
+      </div>
+
+      <!-- Collapsible body -->
+      <div id="ovr-body" style="display:none;padding:12px 14px;border-top:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+          Rename the model folder embedded in <code style="color:var(--text)">--model_path</code>
+          so the script can parse training parameters from the path.
+          The rename persists on disk until cleared.
+        </div>
+        <div class="field">
+          <label>Current folder on disk</label>
+          <input type="text" id="override-current-folder" readonly
+                 style="color:var(--muted);cursor:default;font-size:10px">
+        </div>
+        <div class="field">
+          <label>Command folder name (override)</label>
+          <input type="text" id="override-name-input"
+                 placeholder="e.g. 2019-08-03T16:14_nn_train.py_--g_network_UNet_..."
+                 style="font-size:10px"
+                 onkeydown="if(event.key==='Enter')applyOverride()">
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-a"
+                  style="flex:1;justify-content:center;font-size:10px"
+                  onclick="applyOverride()">⇄ Apply Rename</button>
+          <button class="btn btn-d" id="btn-clear-override"
+                  style="font-size:10px;display:none"
+                  onclick="clearOverride()">↩ Revert</button>
+        </div>
+        <div id="override-status-msg"
+             style="font-size:10px;margin-top:6px;min-height:14px;
+                    line-height:1.4;word-break:break-all"></div>
+      </div><!-- /#ovr-body -->
+    </div><!-- command folder name section -->
+
+    <div class="sel-section">
+      <button class="btn btn-a" id="btn-save-settings" style="width:100%;justify-content:center" onclick="saveSettings()">💾 Save Settings</button>
+    </div>
+
+    <div style="padding:10px 14px;margin-top:auto">
+      <div class="skip-warn" id="skip-warn"></div>
+      <button class="btn btn-a btn-lg" id="btn-go-worker" style="width:100%;justify-content:center" onclick="goWorker()">▶ Go to Worker →</button>
+    </div>
+
+  </div>
+
+  <!-- Right: command list -->
+  <div class="sel-right">
+    <div class="pane-header">
+      <span class="pane-label" style="color:var(--warn)">COMMAND QUEUE</span>
+      <div class="pane-btns-end">
+        <span id="cmd-count" style="font-size:10px;color:var(--muted)"></span>
+        <button class="btn btn-d" id="btn-clear-cmds" onclick="clearCmds()">Clear</button>
+      </div>
+    </div>
+    <div class="cmd-list" id="cmd-list"></div>
+  </div>
+</div>
+
+<!-- ══ APP 3 — WORKER ════════════════════════════════════════════════════════ -->
+<div class="panel" id="panel-wk">
+
+  <!-- Control bar -->
+  <div class="ctrl-bar">
+    <div class="ctrl-group">
+      <label>WORKERS</label>
+      <input type="number" id="num-workers" value="1" min="1" max="16"
+             oninput="onWorkersInput(this.value)">
+    </div>
+    <div class="ctrl-group">
+      <label>OVERWRITE OUTPUT</label>
+      <input type="checkbox" id="chk-overwrite" checked>
+    </div>
+    <button class="btn btn-a btn-lg" id="btn-start" onclick="startWorker()">▶ START DENOISE</button>
+    <button class="btn btn-d" id="btn-cancel" onclick="cancelWorker()" disabled>■ CANCEL</button>
+    <div class="spacer"></div>
+    <div class="ctrl-group">
+      <label>PROCESS LOG</label>
+      <input type="checkbox" id="chk-debug" onchange="onTermToggle(this.checked)">
+    </div>
+    <span class="session-pill sp-idle" id="sess-pill">IDLE</span>
+    <span id="wk-cmd-count" style="font-size:11px;color:var(--muted)"></span>
+  </div>
+
+  <!-- VRAM / RAM bar -->
+  <div class="vram-bar" id="vram-bar">
+    <span style="font-size:10px;color:var(--muted);letter-spacing:1px">VRAM</span>
+    <span style="font-size:11px;color:var(--muted)">No GPU detected or pynvml unavailable</span>
+    <div class="vram-divider"></div>
+    <span style="font-size:10px;color:var(--muted);letter-spacing:1px">RAM</span>
+    <span style="font-size:11px;color:var(--muted)" id="vram-ram-placeholder">—</span>
+  </div>
+
+  <!-- Session report — always visible -->
+  <div class="report-box" id="report-box">
+    <h2>◈ SESSION REPORT</h2>
+    <div class="report-grid" id="report-grid">
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">COMPLETED</div></div>
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">FAILED</div></div>
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">SKIPPED</div></div>
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">MEAN / FILE</div></div>
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">THROUGHPUT</div></div>
+      <div class="rstat"><div class="rstat-val dim">—</div><div class="rstat-lbl">SESSION TIME</div></div>
+    </div>
+  </div>
+
+  <!-- Workers grid — slots spawn left-to-right based on num-workers -->
+  <div class="workers-grid" id="workers-grid"></div>
+
+</div>
+</div><!-- /#app -->
+
+<!-- Transfer panel: uploads + downloads stacked -->
+<div id="xfer-panel">
+  <div id="xfer-panel-hdr">
+    <span id="xfer-panel-title">⇅ TRANSFERS</span>
+    <button class="xfer-ph-btn" id="xfer-collapse-all" onclick="xferCollapseAll()" title="Collapse all">▾</button>
+  </div>
+  <div id="xfer-batches"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════════════════════
+//  GLOBALS
+// ════════════════════════════════════════════════════════════════════════════
+let treeData      = { input: null, output: null };
+let expandedDirs  = new Set();   // stores input-relative dir paths
+// Separate selection sets per tab — fm = File Manager input, fmo = output, sel = Selector
+let fmFiles  = new Set();   // File Manager input selected files
+let fmDirs   = new Set();   // File Manager input selected folders
+let fmoFiles = new Set();   // File Manager output selected files
+let fmoDirs  = new Set();   // File Manager output selected folders
+let selFiles = new Set();   // Selector selected files
+let selDirs  = new Set();   // Selector selected folders
+
+// Helpers — return the correct set for the current mode
+function getFiles(mode) { return mode === 'sel' ? selFiles : mode === 'fmo' ? fmoFiles : fmFiles; }
+function getDirs(mode)  { return mode === 'sel' ? selDirs  : mode === 'fmo' ? fmoDirs  : fmDirs;  }
+let allInputFiles = [];          // flat list of all input file rels
+let settings      = {};
+let locked        = false;
+
+// ════════════════════════════════════════════════════════════════════════════
+//  TAB NAVIGATION
+// ════════════════════════════════════════════════════════════════════════════
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab, .panel').forEach(el => el.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'wk')  loadWkCommands();
+    if (tab.dataset.tab === 'sel') _pollCmds();   // refresh statuses when switching to Selector
+  });
+});
+function goWorker() {
+  document.querySelectorAll('.tab, .panel').forEach(el => el.classList.remove('active'));
+  document.querySelector('[data-tab="wk"]').classList.add('active');
+  document.getElementById('panel-wk').classList.add('active');
+  loadWkCommands();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════════════════════════
+async function init() {
+  settings = await fetch('/api/settings').then(r => r.json());
+  applySettings();
+  await loadModels();
+  await refreshTree();
+  // Poll tree every 4 s; only re-render if content actually changed
+  setInterval(pollTree, 4000);
+  // Poll command statuses every 2 s always — keeps selector queue live
+  // without requiring tab switches or manual refreshes.
+  setInterval(_pollCmds, 2000);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  TREE  (shared between App1 and App2)
+// ════════════════════════════════════════════════════════════════════════════
+let _lastTreeSig = '';   // lightweight change-detection: JSON length + file counts
+
+function _treeSig(d) {
+  // Collects file counts AND a lightweight name fingerprint (last 32 chars of
+  // all concatenated rels) so renames — same count, same size — are detected.
+  const getInfo = n => {
+    let count = (n.files || []).length;
+    let names = (n.files || []).map(f => f.rel).join('|');
+    for (const c of (n.children || [])) {
+      const ci = getInfo(c);
+      count += ci.count;
+      names += ci.names;
+    }
+    return { count, names };
+  };
+  const ii = d.input  ? getInfo(d.input)  : { count: 0, names: '' };
+  const oi = d.output ? getInfo(d.output) : { count: 0, names: '' };
+  const s  = d.storage || {};
+  return `${ii.count}|${oi.count}|${d.locked}|${s.input_used}|${s.output_used}|${ii.names.slice(-32)}|${oi.names.slice(-32)}`;
+}
+
+async function pollTree() {
+  try {
+    const d   = await fetch('/api/tree').then(r => r.json());
+    const sig = _treeSig(d);
+    if (sig === _lastTreeSig) return;   // nothing changed — skip re-render
+    _lastTreeSig = sig;
+    treeData = d;
+    allInputFiles = [];
+    collectFiles(d.input, allInputFiles);
+    renderFmInput();
+    renderFmOutput();
+    renderSelInput();
+    updateSelStats();
+    updateStorage(d.storage);
+    applyLock(d.locked);
+  } catch (_) { /* silently ignore network hiccups during polling */ }
+}
+
+// ── Central lock/unlock — single source of truth for all UI state ─────────
+// All interactive elements that must be disabled while a session is running
+// are wired here. Called from tree watcher, refreshTree, and onWorkerUpdate.
+// "EXCEPT" items: chk-debug (process log toggle) and btn-cancel are NEVER
+// locked — they are the session's control and observation tools.
+function applyLock(isLocked) {
+  locked = isLocked;
+
+  // ── Header ──────────────────────────────────────────────────────────────
+  document.getElementById('lock-badge').classList.toggle('show', isLocked);
+
+  // ── File Manager ────────────────────────────────────────────────────────
+  const ids_fm = [
+    'btn-upload-files', 'btn-upload-folders',
+    'btn-del-input',    'btn-del-output',
+    'btn-mkdir',
+  ];
+  ids_fm.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isLocked; });
+
+  // ── Selector — file selection ────────────────────────────────────────────
+  const ids_sel = [
+    'btn-sel-all', 'btn-sel-none',
+  ];
+  ids_sel.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isLocked; });
+  // Selector tree checkboxes: toggle a CSS class on the tree pane itself so
+  // click handlers can bail early; individual checkbox re-renders pick this up.
+  document.getElementById('tree-sel').classList.toggle('sel-locked', isLocked);
+
+  // ── Selector — settings & command queue ─────────────────────────────────
+  const ids_settings = [
+    'new-net',        // add network input
+    'folder-suffix', 'file-suffix',
+    'device-sel',    'model-sel',
+    'chk-tile',
+    'btn-clear-override',
+    'btn-save-settings',
+    'btn-clear-cmds',
+    'btn-go-worker',
+  ];
+  ids_settings.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isLocked; });
+  // Advanced parameter inputs inside #adv-body
+  document.querySelectorAll('#adv-body input, #adv-body select').forEach(el => { el.disabled = isLocked; });
+  // Command folder name inputs inside #ovr-body
+  document.querySelectorAll('#ovr-body input, #ovr-body button').forEach(el => { el.disabled = isLocked; });
+  // Network tags — add/remove cursor via class; JS click handlers bail when locked
+  document.querySelectorAll('.ntag:not(.unet-locked) .ndel').forEach(el => {
+    el.style.pointerEvents = isLocked ? 'none' : '';
+    el.style.opacity       = isLocked ? '.25'  : '';
+  });
+  document.querySelectorAll('.ntag span:first-child').forEach(el => {
+    el.style.pointerEvents = isLocked ? 'none' : '';
+  });
+
+  // ── Worker — controls (except cancel and process log) ───────────────────
+  const ids_worker = [
+    'num-workers',
+    'chk-overwrite',
+    'btn-start',
+  ];
+  ids_worker.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isLocked; });
+
+  // ── Force-unlock button — only shown when locked with no live session ─────
+  // A live session means _sessionActive is true (set when worker_update confirms
+  // running=true).  If locked but no session is active, a crash left a stale
+  // lock.json — the button lets the user recover without touching the filesystem.
+  const forceBtn = document.getElementById('btn-force-unlock');
+  if (forceBtn) forceBtn.style.display = (isLocked && !_sessionActive) ? '' : 'none';
+}
+
+async function forceUnlock() {
+  if (!confirm('Force-clear the worker lock?\n\nOnly use this if the container was restarted while a session was running and the lock was not cleared automatically.')) return;
+  await fetch('/api/force_unlock', { method: 'POST' });
+  toast('Lock cleared — page will refresh');
+  setTimeout(() => location.reload(), 800);
+}
+
+async function refreshTree() {
+  const d = await fetch('/api/tree').then(r => r.json());
+  _lastTreeSig = _treeSig(d);   // sync signature so next poll skips if unchanged
+  treeData = d;
+
+  // Flatten all input files
+  allInputFiles = [];
+  collectFiles(d.input, allInputFiles);
+
+  renderFmInput();
+  renderFmOutput();
+  _pruneSelectionToTree();   // clean deleted files from selector before render
+  renderSelInput();
+  updateSelStats();
+  updateStorage(d.storage);
+  applyLock(d.locked);
+}
+
+function collectFiles(node, arr) {
+  for (const f of (node.files || [])) arr.push(f);
+  for (const c of (node.children || [])) collectFiles(c, arr);
+}
+
+// ── File Manager – Input tree ─────────────────────────────────────────────
+function renderFmInput() {
+  const el = document.getElementById('tree-input');
+  el.innerHTML = '';
+  if (!treeData.input) return;
+  if (!treeData.input.children.length && !treeData.input.files.length) {
+    el.innerHTML = '<div class="tree-empty">Drop files here or click Upload</div>';
+    return;
+  }
+  renderDirContents(el, treeData.input, 0, 'fm', true);
+}
+
+function renderFmOutput() {
+  const el = document.getElementById('tree-output');
+  el.innerHTML = '';
+  if (!treeData.output) return;
+  if (!treeData.output.children.length && !treeData.output.files.length) {
+    el.innerHTML = '<div class="tree-empty">No output yet</div>';
+    return;
+  }
+  renderDirContents(el, treeData.output, 0, 'fmo', true);
+}
+
+// ── Selector – Input tree ─────────────────────────────────────────────────
+function renderSelInput() {
+  const el = document.getElementById('tree-sel');
+  el.innerHTML = '';
+  if (!treeData.input) return;
+  if (!treeData.input.children.length && !treeData.input.files.length) {
+    el.innerHTML = '<div class="tree-empty">No files. Upload in File Manager.</div>';
+    return;
+  }
+  renderDirContents(el, treeData.input, 0, 'sel', true);
+}
+
+// ── Core renderer ─────────────────────────────────────────────────────────
+function renderDirContents(container, node, depth, mode, showCheck) {
+  for (const child of (node.children || [])) {
+    container.appendChild(buildDirRow(child, depth, mode, showCheck));
+    // output pane: use mirrored expand state
+    const inputRel = mode === 'fmo' ? stripFolderSuffix(child.rel) : child.rel;
+    if (expandedDirs.has(inputRel)) {
+      const sub = document.createElement('div');
+      renderDirContents(sub, child, depth + 1, mode, showCheck);
+      container.appendChild(sub);
+    }
+  }
+  for (const file of (node.files || [])) {
+    container.appendChild(buildFileRow(file, depth, mode, showCheck));
+  }
+}
+
+function buildDirRow(dir, depth, mode, showCheck) {
+  const inputRel = mode === 'fmo' ? stripFolderSuffix(dir.rel) : dir.rel;
+  const expanded = expandedDirs.has(inputRel);
+  const row = document.createElement('div');
+
+  if (showCheck) {
+    const { sel, total } = countDirSel(dir, mode);
+    const dirOwned   = getDirs(mode).has(dir.rel);   // this dir is the selection root
+    const anySelBelow = sel > 0;
+
+    // Ancestor check: is a parent dir already the selection root?
+    const coveredByParent = _isAncestorSelected(dir.rel, mode);
+
+    // Highlight class: owner gets full highlight, children get depth-faded
+    if (dirOwned || coveredByParent) {
+      const childDepth = coveredByParent ? Math.min(_ancestorDepth(dir.rel, mode) + 1, 3) : 0;
+      row.className = 'trow ' + (childDepth === 0 ? 'sel' : `sel-child${childDepth}`);
+    } else if (anySelBelow) {
+      row.className = 'trow sel-child3';  // faint hint: something below is selected
+    } else {
+      row.className = 'trow';
+    }
+
+    // Checkbox: show on the dir if it is the selection boundary.
+    // Hide (but keep placeholder) if covered by a parent dir selection.
+    const chkState = (total === 0 && dirOwned) || (total > 0 && sel === total) ? 'on'
+                   : sel > 0 ? 'par' : '';
+    const chk = mkCheck(chkState);
+    if (coveredByParent) chk.classList.add('hidden');
+    chk.addEventListener('click', e => {
+      e.stopPropagation();
+      if (coveredByParent) return;   // covered rows are not clickable
+      toggleDirSel(dir, mode);
+      refreshTree();
+      if (mode === 'sel') { _broadcastSelIfNeeded(); autoGenerate(); }
+    });
+    row.appendChild(chk);
+  } else {
+    row.className = 'trow';
+  }
+
+  for (let i = 0; i < depth; i++) row.insertBefore(mkIndent(), row.firstChild);
+
+  const icon = mkEl('span', 'ticon', expanded ? '▾' : '▸');
+  icon.style.color = mode === 'fmo' ? 'var(--blue)' : 'var(--warn)';
+  row.appendChild(icon);
+
+  const name = mkEl('span', 'tname', dir.name);
+  row.appendChild(name);
+
+  row.addEventListener('click', e => {
+    if (e.target.classList.contains('tcheck')) return;
+    if (expandedDirs.has(inputRel)) expandedDirs.delete(inputRel);
+    else expandedDirs.add(inputRel);
+    refreshTree();
+  });
+  return row;
+}
+
+function buildFileRow(file, depth, mode, showCheck) {
+  const row = document.createElement('div');
+  const isSel = getFiles(mode).has(file.rel);
+
+  if (showCheck) {
+    const coveredByParent = _isAncestorSelected(file.rel, mode);
+
+    // Highlight: files covered by a parent dir get a faded child highlight
+    if (isSel && coveredByParent) {
+      const d = Math.min(_ancestorDepth(file.rel, mode) + 1, 3);
+      row.className = `trow sel-child${d}`;
+    } else if (isSel) {
+      row.className = 'trow sel';
+    } else {
+      row.className = 'trow';
+    }
+
+    // Checkbox: hide when covered by a parent dir (show only when file is
+    // the actual selection boundary, i.e. individually checked)
+    const chk = mkCheck(isSel ? 'on' : '');
+    if (coveredByParent) chk.classList.add('hidden');
+    chk.addEventListener('click', e => {
+      e.stopPropagation();
+      if (coveredByParent) return;
+      if (getFiles(mode).has(file.rel)) getFiles(mode).delete(file.rel);
+      else getFiles(mode).add(file.rel);
+      _invalidateAncestorDirs(file.rel, getDirs(mode));
+      if (mode === 'fm') _refreshUploadHint();
+      if (mode === 'sel') { _normalizeCoverage(); _broadcastSelIfNeeded(); autoGenerate(); }
+      refreshTree();
+    });
+    row.appendChild(chk);
+  } else {
+    row.className = 'trow';
+  }
+
+  for (let i = 0; i < depth; i++) row.insertBefore(mkIndent(), row.firstChild);
+
+  const icon = mkEl('span', 'ticon', '◻');
+  const isSup = file.is_supported !== undefined ? file.is_supported : file.is_tiff;
+  icon.style.color = isSup ? 'var(--accent)' : 'var(--muted)';
+  row.appendChild(icon);
+
+  const name = mkEl('span', 'tname', file.name);
+  row.appendChild(name);
+
+  if (isSup) row.appendChild(mkEl('span', 'ttiff', 'IMG'));
+  row.appendChild(mkEl('span', 'tsize', fmtBytes(file.size)));
+
+  return row;
+}
+
+// ── Coverage normaliser ──────────────────────────────────────────────────
+// After any sel-mode selection change, walk the input tree top-down.
+// If a dir has ALL files under it selected, add it to selDirs and stop
+// descending (children are covered). Otherwise remove it from selDirs and
+// recurse into children. This means selDirs always holds the minimum set of
+// boundary dirs, which drives the "hide children's checkboxes" display logic.
+function _normalizeCoverage() {
+  if (!treeData || !treeData.input) return;
+
+  function walk(node) {
+    if (node.rel === undefined) {       // virtual root — process children only
+      for (const c of (node.children || [])) walk(c);
+      return;
+    }
+    const { sel, total } = countDirSel(node, 'sel');
+    if (total > 0 && sel === total) {
+      // Fully covered: this dir is the selection boundary
+      selDirs.add(node.rel);
+      // Do NOT recurse — children are covered by this ancestor
+    } else {
+      // Not fully covered: this dir should not be a boundary
+      selDirs.delete(node.rel);
+      for (const c of (node.children || [])) walk(c);
+    }
+  }
+
+  for (const c of (treeData.input.children || [])) walk(c);
+  // Note: files at the root level (no parent dir) always keep individual checkmarks
+}
+
+// ── Ancestor selection helpers ────────────────────────────────────────────
+// Returns true if any ancestor directory of `rel` is in the dirs set for `mode`.
+function _isAncestorSelected(rel, mode) {
+  const dirs = getDirs(mode);
+  let parent = _parentDirRel(rel);
+  while (parent) {
+    if (dirs.has(parent)) return true;
+    parent = _parentDirRel(parent);
+  }
+  return false;
+}
+// Returns how many ancestor levels up the nearest selected ancestor is.
+function _ancestorDepth(rel, mode) {
+  const dirs = getDirs(mode);
+  let depth = 0, parent = _parentDirRel(rel);
+  while (parent) {
+    depth++;
+    if (dirs.has(parent)) return depth;
+    parent = _parentDirRel(parent);
+  }
+  return depth;
+}
+
+// ── Tree helpers ──────────────────────────────────────────────────────────
+function mkEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls)  el.className   = cls;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+function mkIndent() { return mkEl('span', 'tindent'); }
+function mkCheck(state) {
+  const el = document.createElement('div');
+  el.className = 'tcheck' + (state ? ' ' + state : '');
+  el.textContent = state === 'on' ? '✓' : state === 'par' ? '−' : '';
+  return el;
+}
+
+function countDirSel(node, mode) {
+  let sel = 0, total = 0;
+  function w(n) {
+    for (const f of (n.files    || [])) { total++; if (getFiles(mode).has(f.rel)) sel++; }
+    for (const c of (n.children || [])) w(c);
+  }
+  w(node);
+  return { sel, total };
+}
+function toggleDirSel(dir, mode) {
+  // Collect all files and all sub-directory rel paths under this node
+  const files = [];
+  const subDirs = [];
+  function w(n) {
+    for (const f of (n.files||[])) files.push(f.rel);
+    for (const c of (n.children||[])) { subDirs.push(c.rel); w(c); }
+  }
+  w(dir);
+
+  const allSel = files.every(r => getFiles(mode).has(r)) && getDirs(mode).has(dir.rel);
+
+  if (allSel) {
+    // Deselecting: remove this dir AND all child dirs from the dirs set.
+    // Without this, stale child-dir entries remain after unchecking the parent,
+    // causing the upload hint to show a false destination.
+    files.forEach(r => getFiles(mode).delete(r));
+    getDirs(mode).delete(dir.rel);
+    subDirs.forEach(r => getDirs(mode).delete(r));
+  } else {
+    // Selecting: add all files and this dir.
+    // Also remove any child dirs that are now redundantly covered by the parent.
+    files.forEach(r => getFiles(mode).add(r));
+    getDirs(mode).add(dir.rel);
+    subDirs.forEach(r => getDirs(mode).delete(r));
+  }
+
+  if (mode === 'fm') _refreshUploadHint();
+  if (mode === 'sel') _normalizeCoverage();
+}
+function selAll() {
+  if (locked) return;
+  selFiles.clear(); selDirs.clear();
+  allInputFiles.forEach(f => selFiles.add(f.rel));
+  _normalizeCoverage();          // promote fully-covered dirs into selDirs
+  refreshTree(); _broadcastSelIfNeeded(); autoGenerate();
+}
+function selNone() { if (locked) return; selFiles.clear(); selDirs.clear(); refreshTree(); _broadcastSelIfNeeded(); autoGenerate(); }
+
+// ── Dir invalidation helpers ──────────────────────────────────────────────
+// When an individual file checkbox is toggled, every ancestor folder must be
+// removed from the dirs set.  This prevents a stale folder-level rmtree from
+// wiping files the user never selected for deletion.
+function _parentDirRel(rel) {
+  const idx = rel.lastIndexOf('/');
+  return idx > 0 ? rel.slice(0, idx) : null;
+}
+function _invalidateAncestorDirs(fileRel, dirsSet) {
+  let dir = _parentDirRel(fileRel);
+  while (dir) {
+    dirsSet.delete(dir);
+    dir = _parentDirRel(dir);
+  }
+}
+
+// ── Collect all file rels under a tree node ───────────────────────────────
+function _filesUnderNode(root, dirRel) {
+  function find(node) {
+    if (node.rel === dirRel) return node;
+    for (const c of (node.children || [])) { const n = find(c); if (n) return n; }
+    return null;
+  }
+  const node = find(root);
+  if (!node) return [];
+  const out = [];
+  collectFiles(node, out);      // reuses the existing collectFiles helper
+  return out.map(f => f.rel);
+}
+
+function stripFolderSuffix(rel) {
+  const suf = settings.folder_suffix || '_nind';
+  return rel.split('/').map(s => s.endsWith(suf) ? s.slice(0, -suf.length) : s).join('/');
+}
+
+function updateSelStats() {
+  // Build match regex from server-provided supported extensions
+  const exts      = settings.supported_exts || ['.tif', '.tiff'];
+  const escaped   = exts.map(e => e.replace('.', '\\.'));
+  const re        = new RegExp('(' + escaped.join('|') + ')$', 'i');
+  const supported = [...selFiles].filter(r => re.test(r));
+  const skipped   = selFiles.size - supported.length;
+
+  document.getElementById('n-sel').textContent   = selFiles.size;
+  document.getElementById('n-tiff').textContent  = supported.length;
+  document.getElementById('n-skip').textContent  = skipped;
+  document.getElementById('n-total').textContent = allInputFiles.length;
+
+  const warn = document.getElementById('skip-warn');
+  if (skipped > 0) {
+    const fmtList = exts.join(', ');
+    warn.textContent = `⚠ ${skipped} file(s) with unsupported format selected — only ${fmtList} will generate commands.`;
+    warn.classList.add('show');
+  } else {
+    warn.classList.remove('show');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  STORAGE
+// ════════════════════════════════════════════════════════════════════════════
+function updateStorage(s) {
+  if (!s) return;
+  const fmt = n => { for (const u of ['B','KB','MB','GB','TB']) { if (n<1024) return n.toFixed(1)+' '+u; n/=1024; } };
+  document.getElementById('fm-input-size').textContent  = fmt(s.input_used);
+  document.getElementById('fm-output-size').textContent = fmt(s.output_used);
+  document.getElementById('header-storage').textContent =
+    `Disk free: ${fmt(s.disk_free)} / ${fmt(s.disk_total)}`;
+}
+async function refreshStorage() {
+  const s = await fetch('/api/storage').then(r => r.json());
+  updateStorage(s);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  FILE MANAGER ACTIONS
+// ════════════════════════════════════════════════════════════════════════════
+// ── Upload destination hint ───────────────────────────────────────────────
+// Called whenever fmDirs changes (toggle, clear, delete).
+// Shows where uploads will land based on current folder selection.
+function _refreshUploadHint() {
+  const hint = document.getElementById('upload-dest-hint');
+  if (!hint) return;
+
+  if (fmDirs.size === 0) {
+    hint.className = '';
+    hint.style.display = 'none';
+    hint.title = '';
+    return;
+  }
+
+  hint.style.display = '';  // clear inline override so CSS class controls display
+  const { dest, isMultiRoot } = _computeUploadDest();
+
+  if (!isMultiRoot) {
+    const label = dest ? dest.split('/').pop() : 'INPUT root';
+    hint.className   = 'hint-single';
+    hint.textContent = '\u2192 ' + label;
+    hint.title       = 'Upload destination: /' + (dest || '');
+  } else {
+    const roots = [...new Set([...fmDirs].map(d => d.split('/')[0]))];
+    hint.className   = 'hint-multi';
+    hint.textContent = '\u26a0 ' + roots.length + ' unrelated folders';
+    hint.title       = 'Selected folders are in separate trees:\n' + roots.join(', ') +
+                       '\nUploads will go to INPUT root, or cancel to pick one.';
+  }
+}
+
+// _computeUploadDest: find common ancestor of all selected dirs.
+// If every dir in fmDirs is nested under one shallowest root => single dest.
+// Only returns isMultiRoot=true when dirs span genuinely separate trees.
+function _computeUploadDest() {
+  if (fmDirs.size === 0) return { dest: '', isMultiRoot: false };
+
+  // Sort by depth (shallowest first)
+  const dirs = [...fmDirs].sort((a, b) =>
+    a.split('/').length - b.split('/').length || a.localeCompare(b));
+
+  const root = dirs[0];
+  const allNested = dirs.every(d => d === root || d.startsWith(root + '/'));
+
+  if (allNested) {
+    return { dest: root, isMultiRoot: false };
+  }
+  return { dest: '', isMultiRoot: true };
+}
+
+// _resolveUploadDest: returns {dest, ok}. ok=false = user cancelled.
+function _resolveUploadDest() {
+  const { dest, isMultiRoot } = _computeUploadDest();
+  if (!isMultiRoot) return { dest, ok: true };
+
+  const roots = [...new Set([...fmDirs].map(d => d.split('/')[0]))];
+  const proceed = confirm(
+    '\u26a0 Selected folders are in separate locations (' + roots.join(', ') + ')\n\n' +
+    'Files cannot be uploaded into multiple folders at once.\n' +
+    'Click OK to upload to the INPUT root instead,\n' +
+    'or Cancel to go back and select a single destination folder.'
+  );
+  return { dest: '', ok: proceed };
+}
+
+function triggerUploadFiles() {
+  if (locked) { toast('Worker is running — uploads locked'); return; }
+  const { ok } = _resolveUploadDest();
+  if (!ok) return;
+  document.getElementById('file-input').click();
+}
+function triggerUploadFolders() {
+  if (locked) { toast('Worker is running — uploads locked'); return; }
+  // webkitdirectory is not supported on iOS Safari — the input is silently
+  // ignored. Detect it and show a helpful message instead of a broken dialog.
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (isIOS) {
+    toast('Folder upload is not supported on iOS — use Files or drag-and-drop individual files');
+    return;
+  }
+  const { ok } = _resolveUploadDest();
+  if (!ok) return;
+  document.getElementById('folder-input').click();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  TRANSFER MANAGER  (uploads + downloads, stacked batch cards)
+// ════════════════════════════════════════════════════════════════════════════
+const _xfer = {
+  batches:     {},        // local-id → BatchState
+  ownBatchIds: new Set(), // serverBatchIds originated by THIS tab
+                          // — registered BEFORE the upload_batch_start fetch
+                          //   so the socket echo is ignored on the sending tab
+  _nextId: 0,
+};
+
+/* BatchState shape
+  { id, type:'upload'|'download', title, phase:'active'|'done'|'cancelled'|'error',
+    totalBytes, loadedBytes, totalFiles, doneFiles,
+    fillEl, pctEl, cancelBtn, closeBtn, toggleBtn, filesEl,
+    // upload-only:
+    xhrs:[], queue:[], active:0, concurrency:3,
+    fileLoaded:{}, folderData:{}, fileRowData:{},
+    batchId_server, dest, isRemote:bool,
+    // download-only:
+    abortCtrl, jobId, jobType
+  }
+*/
+
+function _xferId() { return 'xb' + (++_xfer._nextId); }
+
+// ── Panel visibility ──────────────────────────────────────────────────────
+function _xferRefreshPanel() {
+  const panel    = document.getElementById('xfer-panel');
+  const batches  = document.getElementById('xfer-batches');
+  // Use DOM child count — the card is appended before _xfer.batches[id] is set,
+  // so checking the JS object would always see 0 at first-create time.
+  panel.classList.toggle('visible', batches.children.length > 0);
+}
+
+// Collapse all existing cards before a new transfer starts
+function _xferCollapseOldBatches() {
+  document.querySelectorAll('#xfer-batches .xb').forEach(el => el.classList.remove('open'));
+}
+
+function xferCollapseAll() {
+  const btn      = document.getElementById('xfer-collapse-all');
+  const batches  = document.querySelectorAll('#xfer-batches .xb');
+  // If any are open, collapse all; if all closed, expand all
+  const anyOpen  = [...batches].some(el => el.classList.contains('open'));
+  batches.forEach(el => el.classList.toggle('open', !anyOpen));
+  btn.textContent = anyOpen ? '▸' : '▾';
+  btn.title       = anyOpen ? 'Expand all' : 'Collapse all';
+}
+
+// ── Create a batch card ───────────────────────────────────────────────────
+function _xferMakeBatch(id, type, title) {
+  const icon   = type === 'upload' ? '⇑' : '⇓';
+  const color  = type === 'upload' ? 'up' : 'dl';
+
+  const div = document.createElement('div');
+  div.className = 'xb open';   // start expanded
+  div.id = id;
+  div.innerHTML = `
+    <div class="xb-hdr">
+      <span class="xb-icon" style="color:var(${type==='upload'?'--accent':'--blue'})">${icon}</span>
+      <div class="xb-meta">
+        <span class="xb-title">${_escHtml(title)}</span>
+      </div>
+      <span class="xb-speed"></span>
+      <div class="xb-bar"><div class="xb-fill ${color}" style="width:0%"></div></div>
+      <span class="xb-pct">0%</span>
+      <button class="xb-btn cancel" title="Cancel" onclick="_xferCancel('${id}')">✕</button>
+      <button class="xb-btn close"  title="Dismiss" onclick="_xferClose('${id}')" style="display:none">×</button>
+      <button class="xb-btn xb-toggle" title="Toggle files" onclick="_xferToggle('${id}')">▾</button>
+    </div>
+    <div class="xb-files"></div>`;
+
+  document.getElementById('xfer-batches').appendChild(div);
+  _xferRefreshPanel();
+
+  return {
+    id, type, title,
+    phase:       'active',
+    totalBytes:  0, loadedBytes: 0,
+    totalFiles:  0, doneFiles:   0,
+    fillEl:      div.querySelector('.xb-fill'),
+    pctEl:       div.querySelector('.xb-pct'),
+    speedEl:     div.querySelector('.xb-speed'),
+    metaEl:      div.querySelector('.xb-meta'),
+    cancelBtn:   div.querySelector('.xb-btn.cancel'),
+    closeBtn:    div.querySelector('.xb-btn.close'),
+    toggleBtn:   div.querySelector('.xb-btn.xb-toggle'),
+    filesEl:     div.querySelector('.xb-files'),
+    el:          div,
+  };
+}
+
+function _escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Format bytes-per-second into a human-readable string.
+function _fmtSpeed(bps) {
+  if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+  if (bps >= 1024)    return (bps / 1024).toFixed(1) + ' KB/s';
+  return bps.toFixed(0) + ' B/s';
+}
+
+// Write the average (⌀) or live speed to the batch speed element.
+// Called at completion or after cancel to freeze the final reading.
+// pass avgBps=0 to leave whatever live value was already showing.
+function _xferFinaliseSpeed(b) {
+  if (!b.speedEl || b.type !== 'upload') return;
+  const elapsed = (Date.now() - (b._startTime || Date.now())) / 1000;
+  const bytes   = b._uploadedBytes || 0;
+  if (elapsed > 0.5 && bytes > 0) {
+    b.speedEl.textContent = '⌀ ' + _fmtSpeed(bytes / elapsed);
+  }
+  // else: keep whatever live speed was last shown (never blank it)
+}
+
+function _xferToggle(id) {
+  document.getElementById(id)?.classList.toggle('open');
+}
+
+function _xferClose(id) {
+  document.getElementById(id)?.remove();
+  delete _xfer.batches[id];
+  _xferRefreshPanel();
+}
+
+function _xferSetDone(b, phase) {
+  b.phase = phase;
+  if (b.serverBatchId) _xfer.ownBatchIds.delete(b.serverBatchId);
+  b.cancelBtn.style.display = 'none';
+  b.closeBtn.style.display  = '';
+
+  // Hide ALL per-row cancel buttons (file + folder rows)
+  b.el.querySelectorAll('.xbf-cancel').forEach(btn => {
+    btn.style.display = 'none';
+  });
+
+  if (phase === 'done') {
+    // Batch bar: _xferUpdateBar handles green-only vs dual-fill, and sets pctEl count
+    _xferUpdateBar(b);
+    if (!b.el.querySelector('.xb-title').textContent.startsWith('✓')) {
+      b.el.querySelector('.xb-title').textContent = '✓ ' + b.title;
+    }
+    // Folder rows: _refreshFolderBar handles ✓ vs X/Y and green vs dual-fill for every folder
+    Object.values(b.folderData || {}).forEach(fd => _refreshFolderBar(fd));
+    _xferFinaliseSpeed(b);   // freeze ⌀ average in the batch header speed slot
+  } else if (phase === 'cancelled') {
+    b.fillEl.classList.remove('pulse');
+    b.fillEl.style.background = '';   // clear any inline gradient from dual-fill
+    b.fillEl.classList.add('err');
+    b.el.querySelector('.xb-title').textContent = '— ' + b.title;
+    b.pctEl.textContent = '–';
+    _xferFinaliseSpeed(b);   // show partial ⌀ if any bytes made it through
+  } else if (phase === 'error') {
+    b.fillEl.classList.remove('pulse');
+    b.fillEl.style.background = '';
+    b.fillEl.classList.add('err');
+    b.pctEl.textContent = '!';
+    _xferFinaliseSpeed(b);
+  }
+}
+
+function _xferUpdateBar(b) {
+  if (b.type === 'download') {
+    // Downloads: byte-level single-colour bar
+    const pct = b.totalBytes > 0
+      ? Math.min(100, Math.round(b.loadedBytes / b.totalBytes * 100))
+      : (b.totalFiles > 0 ? Math.round((b.doneFiles || 0) / b.totalFiles * 100) : 0);
+    b.fillEl.style.width = pct + '%';
+    b.pctEl.textContent  = pct + '%';
+    return;
+  }
+
+  // Uploads: file-count dual-colour batch bar (green = done, red = cancelled)
+  // pctEl shows "done/total" count; visual percentage is conveyed by bar width.
+  const done      = b.doneFiles      || 0;
+  const cancelled = b.cancelledFiles || 0;
+  const total     = b.totalFiles     || 0;
+  if (total === 0) return;
+
+  const donePct   = Math.round(done      / total * 100);
+  const cancelPct = Math.round(cancelled / total * 100);
+  _setDualFill(b.fillEl, donePct, cancelPct);
+
+  // Count label: "done/total" — skipped files don't count toward done
+  b.pctEl.textContent = done + '/' + total;
+}
+
+// Set a dual-colour progress gradient: green=done, red=cancelled.
+// Uses inline style.background directly — CSS class approach fails because
+// .xbf-fill.up (line 584) has equal specificity to .xbf-fill.dual-fill (line 542)
+// and appears later, so it always overrides the gradient on folder bars.
+function _setDualFill(fillEl, donePct, cancelPct) {
+  const total = Math.min(100, donePct + cancelPct);
+  if (cancelPct <= 0) {
+    // Plain green fill — clear any inline gradient and let class colour show
+    fillEl.classList.remove('dual-fill');
+    fillEl.style.background = '';
+    fillEl.style.width = total + '%';
+    return;
+  }
+  // Dual colour: green up to donePct, red up to donePct+cancelPct, transparent beyond
+  const g = donePct;
+  const r = g + cancelPct;
+  fillEl.classList.add('dual-fill');
+  fillEl.style.background = `linear-gradient(to right,
+    var(--accent) 0%, var(--accent) ${g}%,
+    #e55 ${g}%, #e55 ${r}%,
+    transparent ${r}%, transparent 100%)`;
+  fillEl.style.width = '100%';
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  UPLOAD
+// ══════════════════════════════════════════════════════════════════════════
+
+function _xferBuildUploadTree(b, files, isRemote) {
+  // Count how many files (direct + recursive) live under each folder path.
+  // This is used to drive file-count-based progress bars — no byte arithmetic.
+  const folderFileCounts = {};
+  for (const f of files) {
+    const parts = (f.webkitRelativePath || f.relPath || f.name).split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const fp = parts.slice(0, i).join('/');
+      folderFileCounts[fp] = (folderFileCounts[fp] || 0) + 1;
+    }
+  }
+
+  const sorted = [...files].sort((a, z) => {
+    const ra = a.webkitRelativePath || a.relPath || a.name;
+    const rb = z.webkitRelativePath || z.relPath || z.name;
+    return ra.localeCompare(rb);
+  });
+
+  b.fileRowData  = {};
+  b.folderData   = {};
+  const rendered = new Set();
+
+  for (const f of sorted) {
+    const relPath = f.webkitRelativePath || f.relPath || f.name;
+    const parts   = relPath.split('/');
+    const depth   = parts.length - 1;
+
+    // ── Folder rows ──
+    for (let i = 1; i <= depth; i++) {
+      const fp = parts.slice(0, i).join('/');
+      if (rendered.has(fp)) continue;
+      rendered.add(fp);
+      const d = i - 1;
+
+      const row = document.createElement('div');
+      row.className = 'xbf-row';
+      row.dataset.folderPath = fp;
+
+      const indents = '<span class="xbf-indent"></span>'.repeat(d);
+      row.innerHTML = `${indents}
+        <span class="xbf-icon folder">▸</span>
+        <span class="xbf-name folder" title="${_escHtml(fp)}">${_escHtml(parts[i-1])}</span>
+        <div class="xbf-track"><div class="xbf-fill up"></div></div>
+        <span class="xbf-status">0/${folderFileCounts[fp] || 0}</span>
+        <button class="xbf-cancel${isRemote ? ' remote' : ''}" title="Cancel folder"
+          onclick="_xferCancelFolder('${b.id}','${_escHtml(fp)}')">✕</button>`;
+
+      b.filesEl.appendChild(row);
+      b.folderData[fp] = {
+        fillEl:         row.querySelector('.xbf-fill'),
+        statusEl:       row.querySelector('.xbf-status'),
+        cancelBtn:      row.querySelector('.xbf-cancel'),
+        totalFiles:     folderFileCounts[fp] || 0,
+        doneFiles:      0,
+        cancelledFiles: 0,
+      };
+    }
+
+    // ── File row ──
+    const row = document.createElement('div');
+    row.className = 'xbf-row';
+    row.id = 'xbfr-' + b.serverBatchId + '-' + relPath.replace(/[/\\]/g, '_');
+    row.dataset.relPath = relPath;
+
+    const fname  = parts[parts.length - 1];
+    const indents = '<span class="xbf-indent"></span>'.repeat(depth);
+    row.innerHTML = `${indents}
+      <span class="xbf-icon file">◻</span>
+      <span class="xbf-name file" title="${_escHtml(relPath)}">${_escHtml(fname)}</span>
+      <span class="xbf-speed"></span>
+      <div class="xbf-track"><div class="xbf-fill up"></div></div>
+      <span class="xbf-status">–</span>
+      <button class="xbf-cancel${isRemote ? ' remote' : ''}" title="Cancel file"
+        onclick="_xferCancelFile('${b.id}','${_escHtml(relPath)}')">✕</button>`;
+
+    b.filesEl.appendChild(row);
+    b.fileRowData[relPath] = {
+      fillEl:    row.querySelector('.xbf-fill'),
+      statusEl:  row.querySelector('.xbf-status'),
+      speedEl:   row.querySelector('.xbf-speed'),
+      cancelBtn: row.querySelector('.xbf-cancel'),
+      _fileSize: f.size || 0,
+    };
+  }
+}
+
+// ── Folder bar helpers (file-count based) ────────────────────────────────
+// Repaint one folder row from its recursive doneFiles / cancelledFiles counts.
+//
+// Status text rules:
+//   • All resolved, zero cancellations   → "✓"
+//   • All resolved, some cancellations   → "done/total"  (dual-colour bar frozen)
+//   • In progress                        → "resolved/total"
+function _refreshFolderBar(fd) {
+  const total     = fd.totalFiles     || 0;
+  const done      = fd.doneFiles      || 0;
+  const cancelled = fd.cancelledFiles || 0;
+  if (total === 0) return;
+
+  const resolved  = done + cancelled;
+  const donePct   = Math.round(done      / total * 100);
+  const cancelPct = Math.round(cancelled / total * 100);
+
+  _setDualFill(fd.fillEl, donePct, cancelPct);
+
+  if (resolved >= total && cancelled === 0) {
+    fd.statusEl.textContent = '✓';
+  } else if (resolved >= total) {
+    // Fully settled with some skips — show how many actually uploaded
+    fd.statusEl.textContent = done + '/' + total;
+  } else {
+    // Still in flight — show resolved/total so user sees progress
+    fd.statusEl.textContent = resolved + '/' + total;
+  }
+}
+
+// Walk all ancestor folders of relPath, credit +1 done file, repaint each.
+function _xferFolderFileDone(b, relPath) {
+  const parts = relPath.split('/');
+  for (let i = 1; i < parts.length; i++) {
+    const fp = parts.slice(0, i).join('/');
+    const fd = b.folderData?.[fp];
+    if (!fd) continue;
+    fd.doneFiles++;
+    _refreshFolderBar(fd);
+  }
+}
+
+// Walk all ancestor folders of relPath, credit +1 cancelled file, repaint each.
+function _xferFolderFileCancel(b, relPath) {
+  const parts = relPath.split('/');
+  for (let i = 1; i < parts.length; i++) {
+    const fp = parts.slice(0, i).join('/');
+    const fd = b.folderData?.[fp];
+    if (!fd) continue;
+    fd.cancelledFiles++;
+    _refreshFolderBar(fd);
+  }
+}
+
+// ── Per-item cancel ───────────────────────────────────────────────────────
+function _xferCancelFile(batchId, relPath) {
+  const b = _xfer.batches[batchId];
+  if (!b || b.phase !== 'active') return;
+
+  const row = b.fileRowData[relPath];
+
+  // If this file already finished uploading, don't touch counts or folder bars —
+  // it was already credited as done and re-counting it as cancelled would push
+  // donePct + cancelPct > 100%, hiding the red segment behind the green fill.
+  if (row?._resolved) return;
+
+  // Remove from queue if pending
+  b.queue = b.queue.filter(item => item.relPath !== relPath);
+
+  // Abort XHR if in-flight
+  const xhr = b.fileXhrs?.[relPath];
+  if (xhr) { try { xhr.abort(); } catch(_) {} delete b.fileXhrs[relPath]; }
+
+  // Mark row red
+  if (row) {
+    row.fillEl.classList.remove('dual-fill');
+    row.fillEl.style.background = '';
+    row.fillEl.classList.add('err');
+    row.fillEl.style.width      = '100%';
+    row.statusEl.textContent    = '–';
+    if (row.speedEl)  row.speedEl.textContent  = '';
+    if (row.cancelBtn) row.cancelBtn.style.display = 'none';
+    row._resolved = 'cancelled';
+  }
+
+  // Update ancestor folder bars and the batch bar (file-count based)
+  b.cancelledFiles = (b.cancelledFiles || 0) + 1;
+  _xferFolderFileCancel(b, relPath);
+  _xferUpdateBar(b);
+
+  // Broadcast so remote observers update their visual state
+  fetch('/api/upload_file_cancel', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ batch_id: b.serverBatchId, file: relPath }),
+  }).catch(() => {});
+
+  if (b.active === 0 && b.queue.length === 0) _xferUploadCheckDone(b);
+}
+
+function _xferCancelFolder(batchId, folderPath) {
+  const b = _xfer.batches[batchId];
+  if (!b || b.phase !== 'active') return;
+
+  // Collect all files under this folder
+  const prefix = folderPath + '/';
+  const toCancel = Object.keys(b.fileRowData).filter(rp => rp === folderPath || rp.startsWith(prefix));
+  toCancel.forEach(rp => _xferCancelFile(batchId, rp));
+
+  // Folder bar already updated by each _xferCancelFile call above.
+  // Just hide the cancel button.
+  const fd = b.folderData[folderPath];
+  if (fd) {
+    if (fd.cancelBtn) fd.cancelBtn.style.display = 'none';
+  }
+}
+
+function _xferUploadNext(b) {
+  while (b.active < b.concurrency && b.queue.length > 0) {
+    const item = b.queue.shift();
+    b.active++;
+    // Register in active map so _xferUpdateBatchSpeed can aggregate
+    b._activeItems[item.relPath] = item;
+    item._speedBps    = 0;
+    item._speedTime   = Date.now();
+    item._speedLoaded = 0;
+
+    const fd = new FormData();
+    fd.append('files', item.file, item.relPath);
+    fd.append('dest',        item.dest);
+    fd.append('batch_id',    b.serverBatchId);
+    fd.append('batch_total', b.totalFiles);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    if (!b.fileXhrs) b.fileXhrs = {};
+    b.fileXhrs[item.relPath] = xhr;
+
+    xhr.upload.addEventListener('progress', e => {
+      if (!e.lengthComputable) return;
+
+      // ── File row bar + right-side percentage ─────────────────────────────
+      const pct = Math.round(e.loaded / e.total * 100);
+      if (item.fillEl)   item.fillEl.style.width  = pct + '%';
+      if (item.statusEl) item.statusEl.textContent = pct + '%';
+
+      // ── Per-item EMA speed ────────────────────────────────────────────────
+      // α=0.25 dampens short bursts; require ≥100ms between samples to avoid
+      // division by near-zero when browser fires rapid sub-ms events.
+      const now = Date.now();
+      const dt  = now - item._speedTime;
+      if (dt >= 100) {
+        const raw = (e.loaded - item._speedLoaded) / dt * 1000;
+        item._speedBps    = item._speedBps ? item._speedBps * 0.75 + raw * 0.25 : raw;
+        item._speedTime   = now;
+        item._speedLoaded = e.loaded;
+      }
+      // Speed shown left of bar once EMA has a valid reading
+      if (item.speedEl) {
+        item.speedEl.textContent = item._speedBps > 0 ? _fmtSpeed(item._speedBps) : '';
+      }
+
+      // ── Batch header combined speed (throttled to max 4 repaints/sec) ─────
+      _xferUpdateBatchSpeed(b);
+    });
+
+    xhr.addEventListener('load', () => {
+      b.active--;
+      delete b.fileXhrs?.[item.relPath];
+      delete b._activeItems[item.relPath];
+      b._uploadedBytes += item._fileSize || 0;
+      if (item.fillEl)    item.fillEl.style.width   = '100%';
+      if (item.statusEl)  item.statusEl.textContent = '✓';
+      if (item.speedEl)   item.speedEl.textContent  = '';
+      if (item.cancelBtn) item.cancelBtn.style.display = 'none';
+      // Mark resolved so a late folder-cancel doesn't double-count this file
+      const _rd = b.fileRowData[item.relPath];
+      if (_rd) _rd._resolved = 'done';
+      b.doneFiles++;
+      _xferFolderFileDone(b, item.relPath);   // credit +1 done to all ancestor folders
+      _xferUpdateBar(b);                       // advance batch bar by one file
+      _xferUploadCheckDone(b);
+      _xferUploadNext(b);
+    });
+
+    const _onXhrFail = (isAbort) => {
+      b.active--;
+      delete b.fileXhrs?.[item.relPath];
+      delete b._activeItems[item.relPath];
+      if (item.speedEl) item.speedEl.textContent = '';
+      if (!isAbort) {
+        // Network error — mark as failed
+        if (item.fillEl)   item.fillEl.classList.add('err');
+        if (item.statusEl) item.statusEl.textContent = '✗';
+        b.doneFiles++;
+      }
+      // Aborted files already had their row marked by _xferCancelFile;
+      // doneFiles was NOT incremented for them (totalFiles was decremented instead).
+      // Either way we must drain the queue and check for completion.
+      _xferUploadCheckDone(b);
+      _xferUploadNext(b);
+    };
+    xhr.addEventListener('error', () => _onXhrFail(false));
+    xhr.addEventListener('abort', () => _onXhrFail(true));
+
+    b.fileLoaded[item.relPath] = 0;
+    xhr.send(fd);
+  }
+}
+
+// ── Batch header speed aggregator (throttled, batch level only) ──────────────
+// Sums EMA speeds across all active XHR items and writes to b.speedEl.
+// File rows and folder rows are NOT touched — they show % and count respectively.
+function _xferUpdateBatchSpeed(b) {
+  const now = Date.now();
+  if (b._lastSpeedTick && now - b._lastSpeedTick < 250) return;
+  b._lastSpeedTick = now;
+
+  let batchBps = 0;
+  for (const item of Object.values(b._activeItems || {})) {
+    batchBps += item._speedBps || 0;
+  }
+
+  if (b.speedEl) b.speedEl.textContent = batchBps > 0 ? _fmtSpeed(batchBps) : '';
+}
+
+function _xferUploadCheckDone(b) {
+  if (b.phase !== 'active') return;
+  const resolved = (b.doneFiles || 0) + (b.cancelledFiles || 0);
+  if (b.active === 0 && b.queue.length === 0 && resolved >= b.totalFiles) {
+    _xferSetDone(b, 'done');
+    fmFiles.clear(); fmDirs.clear(); _refreshUploadHint();
+    refreshTree();
+  }
+}
+
+async function _xferStartUpload(files, dest) {
+  if (!files.length) return;
+  const serverBatchId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const fileList = files.map(f => ({
+    relPath: f.webkitRelativePath || f.name,
+    size:    f.size || 0,
+  }));
+
+  // Derive a human title
+  const roots = [...new Set(fileList.map(f => f.relPath.split('/')[0]))];
+  const title = roots.length === 1 && fileList.length > 1
+    ? roots[0]   // whole folder — use folder name
+    : fileList.length === 1
+      ? fileList[0].relPath.split('/').pop()
+      : `${fileList.length} files${dest ? ' → ' + dest.split('/').pop() + '/' : ''}`;
+
+  // Register BEFORE the fetch — the socket echo can arrive while the
+  // await is in flight, so the guard must be in place first.
+  _xfer.ownBatchIds.add(serverBatchId);
+
+  // Announce to server (includes full file list for remote tree rebuild)
+  await fetch('/api/upload_batch_start', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ batch_id: serverBatchId, title, file_count: fileList.length, files: fileList }),
+  }).catch(() => {});
+
+  _xferCollapseOldBatches();
+  const id = _xferId();
+  const b  = _xferMakeBatch(id, 'upload', title);
+  b.id            = id;    // needed by cancel callbacks in row HTML
+  b.serverBatchId = serverBatchId;
+  b.dest          = dest;
+  b.concurrency   = 3;
+  b.active        = 0;
+  b.fileXhrs      = {};
+  b.fileLoaded    = {};
+  b.folderData    = {};
+  b.fileRowData   = {};
+  b.totalFiles    = files.length;
+  b.doneFiles     = 0;
+  b.totalBytes    = files.reduce((s, f) => s + (f.size || 0), 0);
+  b.loadedBytes   = 0;
+  b._startTime     = Date.now();   // wall-clock start for average speed
+  b._uploadedBytes = 0;            // bytes confirmed done (excludes cancelled)
+  b._activeItems   = {};           // relPath → item, live XHRs for speed aggregation
+
+  _xferBuildUploadTree(b, files, false);
+  _xferUpdateBar(b);   // paint "0/N" immediately — avoids the "0%" flash before first file completes
+
+  b.queue = files.map(f => {
+    const relPath = f.webkitRelativePath || f.name;
+    const row = b.fileRowData[relPath];
+    return { file: f, relPath, dest, _fileSize: f.size || 0,
+             fillEl: row?.fillEl, statusEl: row?.statusEl,
+             speedEl: row?.speedEl, cancelBtn: row?.cancelBtn };
+  });
+
+  _xfer.batches[id] = b;
+  _xferUploadNext(b);
+}
+
+// ── Public upload entry points ───────────────────────────────────────────
+async function doUpload(input) {
+  if (locked) return;
+  const { dest, ok } = _resolveUploadDest();
+  if (!ok) { input.value = ''; return; }
+  if (!input.files.length) return;
+  await _xferStartUpload(Array.from(input.files), dest);
+  input.value = '';
+}
+
+function onDrop(e) {
+  e.preventDefault();
+  e.currentTarget.style.background = '';
+  if (locked) { toast('Worker is running — uploads locked'); return; }
+  const { dest, ok } = _resolveUploadDest();
+  if (!ok) return;
+  const files = Array.from(e.dataTransfer.files);
+  if (!files.length) return;
+  _xferStartUpload(files, dest);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  DOWNLOAD
+// ══════════════════════════════════════════════════════════════════════════
+
+function _xferCancel(id) {
+  const b = _xfer.batches[id];
+  if (!b || b.phase !== 'active') return;
+  if (b.type === 'upload') {
+    // Collect all files that haven't finished yet (queued + in-flight)
+    const pendingPaths = new Set([
+      ...b.queue.map(item => item.relPath),
+      ...Object.keys(b.fileXhrs || {}),
+    ]);
+
+    // Abort in-flight XHRs silently (abort event will still fire but
+    // _onXhrFail(true) no-ops on visual since we've already marked them)
+    b.queue = [];
+    Object.values(b.fileXhrs || {}).forEach(x => { try { x.abort(); } catch(_) {} });
+
+    // Mark each pending file row red and update ancestor folder bars + batch bar
+    for (const relPath of pendingPaths) {
+      const row = b.fileRowData[relPath];
+      if (row) {
+        row.fillEl.classList.remove('dual-fill');
+        row.fillEl.style.background = '';
+        row.fillEl.classList.add('err');
+        row.fillEl.style.width   = '100%';
+        row.statusEl.textContent = '–';
+      }
+      b.cancelledFiles = (b.cancelledFiles || 0) + 1;
+      _xferFolderFileCancel(b, relPath);
+    }
+
+    // Broadcast cancel to remotes (include pending list for their red bars)
+    fetch('/api/upload_batch_cancel', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        batch_id:      b.serverBatchId,
+        pending_files: [...pendingPaths].map(rp => ({
+          relPath:  rp,
+          file_size: b.fileRowData[rp]?._fileSize || 0,
+        })),
+      }),
+    }).catch(() => {});
+
+    // Freeze the main bar in dual-colour at the stopped point
+    _xferUpdateBar(b);
+    _xferSetDone(b, 'done');  // 'done' so we show ✓ + final dual bar
+    b.el.querySelector('.xb-title').textContent = '✓ ' + b.title + ' (partial)';
+    fmFiles.clear(); fmDirs.clear(); _refreshUploadHint();
+    refreshTree();
+  } else if (b.type === 'download') {
+    b.abortCtrl && b.abortCtrl.abort();
+    if (b.jobId) fetch('/api/download_cancel/' + b.jobId, { method: 'POST' }).catch(() => {});
+    _xferSetDone(b, 'cancelled');
+  }
+}
+
+async function _xferStartDownload(section, relFiles, relDirs, relPath) {
+  let title;
+  if (relPath === '') {
+    title = section + '.zip';
+  } else if (relPath) {
+    title = relPath.split('/').pop() || relPath;
+  } else if (relFiles.length === 1 && relDirs.length === 0) {
+    title = relFiles[0].split('/').pop();
+  } else {
+    title = (relFiles.length + relDirs.length) + ' items';
+  }
+
+  _xferCollapseOldBatches();
+  const id = _xferId();
+  const b  = _xferMakeBatch(id, 'download', title);
+  b.abortCtrl = new AbortController();
+  b.totalFiles = 0; b.doneFiles = 0;
+  b.totalBytes = 0; b.loadedBytes = 0;
+  b.jobId = null; b.jobType = null;
+  _xfer.batches[id] = b;
+
+  try {
+    // Show immediate indeterminate pulse
+    b.fillEl.classList.add('pulse');
+    b.fillEl.style.width = '100%';
+    b.pctEl.textContent  = '…';
+    b.el.querySelector('.xb-title').textContent = '⏳ ' + title;
+
+    const prep = await fetch('/api/download_prepare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      signal: b.abortCtrl.signal,
+      body: JSON.stringify({
+        section, path: relPath, files: relFiles, dirs: relDirs,
+        name: title.endsWith('.zip') ? title : title + '.zip',
+      }),
+    }).then(r => r.json());
+
+    if (prep.error) throw new Error(prep.error);
+    b.jobId   = prep.job_id;
+    b.jobType = prep.type;
+    b.totalFiles = prep.total || 1;
+
+    if (prep.type !== 'file') {
+      b.el.querySelector('.xb-title').textContent = '⏳ Preparing ' + title;
+      await _xferWaitReady(b);
+      if (b.phase !== 'active') return;
+    }
+
+    // Stream the result
+    b.fillEl.classList.remove('pulse');
+    b.fillEl.style.width = '0%';
+    b.el.querySelector('.xb-title').textContent = '⇓ ' + title;
+
+    const res = await fetch('/api/download_result/' + b.jobId, {
+      signal: b.abortCtrl.signal,
+    });
+    if (!res.ok) throw new Error('Server error ' + res.status);
+
+    const contentLength = parseInt(res.headers.get('Content-Length') || '0');
+    b.totalBytes = contentLength;
+
+    const reader = res.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (b.phase !== 'active') { reader.cancel(); return; }
+      chunks.push(value);
+      loaded += value.byteLength;
+      b.loadedBytes = loaded;
+      _xferUpdateBar(b);
+    }
+
+    // Trigger browser save dialog
+    const ct   = res.headers.get('Content-Type') || 'application/octet-stream';
+    const blob = new Blob(chunks, { type: ct });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = (prep.type === 'file' || title.endsWith('.zip')) ? title : title + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+    _xferSetDone(b, 'done');
+  } catch (err) {
+    if (err.name === 'AbortError' || b.phase === 'cancelled') {
+      if (b.phase !== 'cancelled') _xferSetDone(b, 'cancelled');
+    } else {
+      b.el.querySelector('.xb-title').textContent = '✗ ' + title;
+      _xferSetDone(b, 'error');
+      toast('Download failed: ' + err.message);
+    }
+  }
+}
+
+function _xferWaitReady(b) {
+  return new Promise((resolve) => {
+    b._readyResolve = resolve;
+    b._readyPoll = setInterval(async () => {
+      if (b.phase !== 'active') { clearInterval(b._readyPoll); resolve(); return; }
+      try {
+        const s = await fetch('/api/download_status/' + b.jobId).then(r => r.json());
+        if (s.status === 'ready')     { clearInterval(b._readyPoll); resolve(); }
+        if (s.status === 'cancelled') { clearInterval(b._readyPoll); _xferSetDone(b, 'cancelled'); resolve(); }
+        if (s.status === 'error')     { clearInterval(b._readyPoll); _xferSetDone(b, 'error');     resolve(); }
+        if (s.total > 0) {
+          b.doneFiles  = s.done  || 0;
+          b.totalFiles = s.total || 1;
+          _xferUpdateBar(b);
+        }
+      } catch(_) {}
+    }, 500);
+  });
+}
+
+
+
+// ── Public download entry point ───────────────────────────────────────────
+function downloadSection(section) {
+  const files = section === 'output' ? [...fmoFiles] : [...fmFiles];
+  const dirs  = section === 'output' ? [...fmoDirs]  : [...fmDirs];
+  if (files.length === 0 && dirs.length === 0) {
+    _xferStartDownload(section, [], [], '');
+  } else {
+    _xferStartDownload(section, files, dirs, '');
+  }
+}
+
+// ── Remote upload observer (from syncSocket events) ───────────────────────
+function _xferOnUploadBatchStart(data) {
+  // Ignore echo: this tab initiated this batch — it already has a local card
+  if (_xfer.ownBatchIds.has(data.batch_id)) return;
+  const id = 'xb-remote-' + data.batch_id;
+  if (_xfer.batches[id]) return;  // guard against duplicate socket delivery
+
+  // Collapse existing cards just like a local upload would
+  _xferCollapseOldBatches();
+
+  const b = _xferMakeBatch(id, 'upload', data.title || 'Remote upload');
+  b.id            = id;
+  b.serverBatchId = data.batch_id;
+  b.isRemote      = true;
+  b.totalFiles     = data.file_count || 0;
+  b.doneFiles      = 0;
+  b.cancelledFiles = 0;
+  b.fileRowData    = {};
+  b.folderData     = {};
+  b._startTime     = Date.now();
+  b._uploadedBytes = 0;
+  b._activeItems   = {};
+  b.cancelBtn.style.display = 'none';
+
+  // Inject the remote indicator as a subtitle line inside .xb-meta (below the title)
+  // This frees the right side of the header from a badge, keeping the layout clean.
+  const sub = document.createElement('span');
+  sub.className   = 'xb-subtitle';
+  sub.textContent = '📡 remote';
+  b.metaEl.appendChild(sub);
+
+  _xfer.batches[id] = b;
+
+  if (data.files && data.files.length) {
+    _xferBuildUploadTree(b, data.files, true);
+  }
+}
+
+function _xferOnUploadFileDone(data) {
+  const id = 'xb-remote-' + data.batch_id;
+  const b  = _xfer.batches[id];
+  if (!b) return;
+
+  const relPath = data.file || '';
+  b.doneFiles++;
+  b.totalFiles = Math.max(b.totalFiles, data.batch_total || b.totalFiles);
+  // Accumulate confirmed bytes so _xferFinaliseSpeed can compute ⌀ on completion
+  const fileBytes = data.file_size || 0;
+  b._uploadedBytes = (b._uploadedBytes || 0) + fileBytes;
+
+  // ── Remote real-time speed (EMA over inter-file-done intervals) ──────────
+  // We don't have per-byte XHR progress on the observer side, so we use the
+  // time between consecutive upload_file_done events as a coarse rate sample.
+  // α=0.3 keeps the reading responsive to sudden speed changes.
+  const now = Date.now();
+  if (b._remoteLastDoneTime && fileBytes > 0) {
+    const dtSec = (now - b._remoteLastDoneTime) / 1000;
+    if (dtSec > 0) {
+      const raw = fileBytes / dtSec;
+      b._remoteSpeedBps = b._remoteSpeedBps
+        ? b._remoteSpeedBps * 0.7 + raw * 0.3
+        : raw;
+      if (b.speedEl) b.speedEl.textContent = _fmtSpeed(b._remoteSpeedBps);
+    }
+  }
+  b._remoteLastDoneTime = now;
+
+  const row = b.fileRowData?.[relPath];
+  if (row) {
+    row.fillEl.style.width   = '100%';
+    row.statusEl.textContent = '✓';
+    row._resolved = 'done';
+  }
+
+  _xferFolderFileDone(b, relPath);
+  _xferUpdateBar(b);
+  const resolved = (b.doneFiles || 0) + (b.cancelledFiles || 0);
+  if (resolved >= b.totalFiles) _xferSetDone(b, 'done');
+}
+
+function _xferOnUploadFileCancel(data) {
+  const id = 'xb-remote-' + data.batch_id;
+  const b  = _xfer.batches[id];
+  if (!b) return;
+  const relPath = data.file || '';
+  const row = b.fileRowData[relPath];
+
+  // Guard: if already counted as done, skip — double-counting pushes
+  // donePct+cancelPct > 100% and the red segment becomes invisible.
+  if (row?._resolved) return;
+
+  if (row) {
+    row.fillEl.classList.remove('dual-fill');
+    row.fillEl.style.background = '';
+    row.fillEl.classList.add('err');
+    row.fillEl.style.width   = '100%';
+    row.statusEl.textContent = '–';
+    row._resolved = 'cancelled';
+  }
+  b.cancelledFiles = (b.cancelledFiles || 0) + 1;
+  _xferFolderFileCancel(b, relPath);
+  _xferUpdateBar(b);
+  const resolved = (b.doneFiles || 0) + b.cancelledFiles;
+  if (resolved >= b.totalFiles) _xferSetDone(b, 'done');
+}
+
+function _xferOnUploadBatchCancel(data) {
+  const id = 'xb-remote-' + data.batch_id;
+  const b  = _xfer.batches[id];
+  if (!b) return;
+
+  // Mark every unresolved file row red and walk ancestor folders once per file
+  for (const [relPath, row] of Object.entries(b.fileRowData || {})) {
+    if (row._resolved) continue;   // already done or already cancelled — don't double-count
+    row.fillEl.classList.remove('dual-fill');
+    row.fillEl.style.background = '';
+    row.fillEl.classList.add('err');
+    row.fillEl.style.width   = '100%';
+    row.statusEl.textContent = '–';
+    row._resolved = 'cancelled';
+    b.cancelledFiles = (b.cancelledFiles || 0) + 1;
+    _xferFolderFileCancel(b, relPath);
+  }
+
+  _xferUpdateBar(b);
+  _xferSetDone(b, 'done');
+  b.el.querySelector('.xb-title').textContent = '✓ ' + (b.title || 'Remote upload') + ' (partial)';
+}
+
+
+async function deleteOutputSelected() {
+  if (locked) { toast('Worker is running — deletions locked'); return; }
+
+  // ── Output delete policy ──────────────────────────────────────────────────
+  // The output folder tree mirrors the input tree and must stay intact.
+  // Only FILES are ever deleted from the output section — folders are never
+  // removed here regardless of what is selected.  This also guarantees that
+  // input files can never be accidentally touched by an output-side delete.
+  //
+  // When a folder is checked in the output pane, we expand it into its
+  // constituent files and delete those files individually.  The folder itself
+  // stays on disk.  Only an input-side delete can remove output folders
+  // (via the mirrored delete that goes through the input tree).
+
+  // Expand all selected dirs into individual file rels
+  const fileSet = new Set(fmoFiles);
+  for (const dirRel of fmoDirs) {
+    const dirFiles = _filesUnderNode(treeData.output, dirRel);
+    dirFiles.forEach(r => fileSet.add(r));
+  }
+
+  const total = fileSet.size;
+  if (!total) { toast('Select output files or folders first'); return; }
+  if (!confirm(`Delete ${total} output file(s)?\n\nFolder structure will be preserved. This cannot be undone.`)) return;
+
+  await Promise.all([...fileSet].map(rel =>
+    fetch('/api/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: rel, section: 'output' })
+    })
+  ));
+  fmoFiles.clear();
+  fmoDirs.clear();
+  refreshTree();
+  toast(`Deleted ${total} output file(s) — folders kept intact`);
+}
+
+async function deleteSelected() {
+  if (locked) { toast('Worker is running — deletions locked'); return; }
+
+  // ── Build a safe delete plan ──────────────────────────────────────────────
+  // A folder is only rmtree'd when every file under it is in fmFiles (or it is
+  // empty).  If only some files are selected, we delete those files individually
+  // and leave the folder intact — the server will prune it if it becomes empty.
+  // Child dirs whose ancestor is already being rmtree'd are also skipped to
+  // avoid redundant (and potentially harmful) double-delete attempts.
+  const fileSet = new Set(fmFiles);
+  const rmtreeDirs = [];
+
+  for (const dirRel of fmDirs) {
+    const dirFiles = _filesUnderNode(treeData.input, dirRel);
+    const allCovered = dirFiles.length === 0 || dirFiles.every(r => fileSet.has(r));
+    if (allCovered) {
+      dirFiles.forEach(r => fileSet.delete(r));   // no need to delete these individually
+      rmtreeDirs.push(dirRel);
+    }
+    // else: partial selection — only delete the individual files, not the folder
+  }
+
+  // Remove child dirs if their parent is already being rmtree'd
+  const finalDirs = rmtreeDirs.filter(d =>
+    !rmtreeDirs.some(other => other !== d && d.startsWith(other + '/'))
+  );
+
+  const total = fileSet.size + finalDirs.length;
+  if (!total) { toast('Select files or folders first'); return; }
+  if (!confirm(`Delete ${total} item(s) and their mirrored output?`)) return;
+
+  await Promise.all([
+    ...[...fileSet].map(rel =>
+      fetch('/api/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: rel, section: 'both' })
+      })
+    ),
+    ...[...finalDirs].map(rel =>
+      fetch('/api/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: rel, section: 'both' })
+      })
+    ),
+  ]);
+  fmFiles.clear();
+  fmDirs.clear();
+  _refreshUploadHint();
+  refreshTree();
+  autoGenerate();
+  toast(`Deleted ${total} item(s)`);
+}
+
+async function mkdirInput() {
+  if (locked) { toast('Worker is running'); return; }
+  const name = (prompt('New folder name:') || '').trim();
+  if (!name) return;
+
+  // Build target list:
+  // - No folders selected  -> create at input root
+  // - 1+ folders selected  -> create inside each selected folder (multi OK for mkdir)
+  const targets = fmDirs.size > 0 ? [...fmDirs] : [''];
+
+  const label = targets.length === 1
+    ? (targets[0] ? targets[0].split('/').pop() : 'INPUT root')
+    : `${targets.length} folders`;
+
+  await Promise.all(targets.map(dest =>
+    fetch('/api/mkdir', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: dest ? `${dest}/${name}` : name })
+    })
+  ));
+  toast(`Created "${name}" in ${label}`);
+  fmFiles.clear(); fmDirs.clear(); _refreshUploadHint();
+  refreshTree();
+}
+
+
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SETTINGS
+// ════════════════════════════════════════════════════════════════════════════
+function applySettings() {
+  document.getElementById('folder-suffix').value = settings.folder_suffix || '_nind';
+  document.getElementById('file-suffix').value   = settings.file_suffix   || '_nindimg';
+  document.getElementById('device-sel').value    = settings.device        || '0';
+  document.getElementById('model-path').value    = settings.model_path    || '';
+  const useTs = !!settings.use_tile_size;
+  document.getElementById('chk-tile').checked    = useTs;
+  document.getElementById('tile-inputs').style.display = useTs ? '' : 'none';
+  const net = settings.network || 'UNet';
+  const def = _tileDefaults(net);
+  document.getElementById('inp-cs').value  = settings.cs  ?? def.cs;
+  document.getElementById('inp-ucs').value = settings.ucs ?? def.ucs;
+  _updateUcsHint();
+  // Supported formats display
+  const extsEl = document.getElementById('supported-exts-display');
+  if (extsEl) {
+    const exts = settings.supported_exts || ['.tif', '.tiff'];
+    extsEl.textContent = exts.join(', ');
+  }
+  // Advanced parameters
+  document.getElementById('adv-overlap').value       = settings.overlap          ?? '';
+  document.getElementById('adv-batch').value         = settings.batch_size       ?? '';
+  document.getElementById('adv-exif').value          = settings.exif_method      ?? '';
+  document.getElementById('adv-model-params').value  = settings.model_parameters ?? '';
+  document.getElementById('adv-maxpx').value         = settings.max_subpixels    ?? '';
+  document.getElementById('adv-whole').checked       = !!settings.whole_image;
+  document.getElementById('adv-pad-row').style.display = settings.whole_image ? '' : 'none';
+  document.getElementById('adv-pad').value           = settings.pad              ?? '';
+  document.getElementById('adv-debug').checked       = !!settings.debug;
+
+  const noModel = !settings.model_path;
+  document.getElementById('model-warn').classList.toggle('show', noModel);
+  renderNetworkTags();
+}
+
+function _buildSettingsPayload() {
+  return {
+    folder_suffix:    document.getElementById('folder-suffix').value,
+    file_suffix:      document.getElementById('file-suffix').value,
+    device:           document.getElementById('device-sel').value,
+    model_path:       settings.model_path || '',
+    network:          settings.network  || 'UNet',
+    networks:         settings.networks || ['UNet', 'UtNet'],
+    use_tile_size:    document.getElementById('chk-tile').checked,
+    cs:               parseInt(document.getElementById('inp-cs').value)  || _tileDefaults(settings.network || 'UNet').cs,
+    ucs:              parseInt(document.getElementById('inp-ucs').value) || _tileDefaults(settings.network || 'UNet').ucs,
+    // Advanced — empty string means "omit from commands"
+    overlap:          document.getElementById('adv-overlap').value.trim(),
+    batch_size:       document.getElementById('adv-batch').value.trim(),
+    exif_method:      document.getElementById('adv-exif').value,
+    model_parameters: document.getElementById('adv-model-params').value.trim(),
+    max_subpixels:    document.getElementById('adv-maxpx').value.trim(),
+    whole_image:      document.getElementById('adv-whole').checked,
+    pad:              document.getElementById('adv-pad').value.trim(),
+    debug:            document.getElementById('adv-debug').checked,
+    // locked_networks is derived server-side — never sent back
+  };
+}
+function _applyNetworkTileDefaults(network) {
+  // Only auto-fill if the user hasn't manually changed the values away from any known default
+  const def = _tileDefaults(network);
+  // Always update to the new network's defaults when network switches
+  document.getElementById('inp-cs').value  = def.cs;
+  document.getElementById('inp-ucs').value = def.ucs;
+  settings.cs  = def.cs;
+  settings.ucs = def.ucs;
+  _updateUcsHint();
+}
+
+
+// _tileDefaults reads from settings.network_tile_defaults which is set by the
+// server in DEFAULT_SETTINGS and auto-attached to every load_settings() response.
+// Custom networks not in the map fall back to UNet's defaults (the base locked
+// architecture), then to hardcoded values if settings hasn't loaded yet.
+function _tileDefaults(network) {
+  const map = (settings && settings.network_tile_defaults) || {};
+  return map[network] || map['UNet'] || { cs: 440, ucs: 320 };
+}
+
+// Generic collapsible-section toggle — eliminates the identical 6-line pattern.
+function _toggleSection(bodyId, arrowId, headerId) {
+  const body  = document.getElementById(bodyId);
+  const arrow = document.getElementById(arrowId);
+  const hdr   = document.getElementById(headerId);
+  const open  = body.style.display === 'none';
+  body.style.display          = open ? '' : 'none';
+  arrow.style.transform       = open ? 'rotate(90deg)' : '';
+  arrow.style.color           = open ? 'var(--accent)' : 'var(--muted)';
+  hdr.style.borderBottomColor = open ? 'var(--border)'  : 'transparent';
+}
+function toggleAdvanced() { _toggleSection('adv-body', 'adv-arrow', 'adv-toggle'); }
+function toggleOverride()  { _toggleSection('ovr-body', 'ovr-arrow', 'ovr-toggle'); }
+function onWholeImageChange() {
+  const on = document.getElementById('adv-whole').checked;
+  document.getElementById('adv-pad-row').style.display = on ? '' : 'none';
+  saveSettingsQuiet();
+}
+
+
+function onTileToggle() {
+  const on = document.getElementById('chk-tile').checked;
+  document.getElementById('tile-inputs').style.display = on ? '' : 'none';
+  if (on) _updateUcsHint();
+  saveSettingsQuiet();
+}
+
+function onCsUcsChange() {
+  _updateUcsHint();
+  saveSettingsQuiet();
+}
+
+function _updateUcsHint() {
+  const net  = settings.network || 'UNet';
+  const def  = _tileDefaults(net);
+  const cs   = parseInt(document.getElementById('inp-cs').value)  || def.cs;
+  const ucs  = parseInt(document.getElementById('inp-ucs').value) || def.ucs;
+
+  // Default value hints below each input
+  const csDH  = document.getElementById('cs-default-hint');
+  const ucsDH = document.getElementById('ucs-default-hint');
+  if (csDH)  csDH.textContent  = `default for ${net}: ${def.cs}`;
+  if (ucsDH) ucsDH.textContent = `default for ${net}: ${def.ucs}`;
+
+  // Ratio hint — UNet only
+  const el = document.getElementById('ucs-ratio-hint');
+  if (!el) return;
+  if (net === 'UNet') {
+    const ratio = (ucs / cs * 100).toFixed(0);
+    const ok    = ucs <= cs * 0.75;
+    el.style.color  = ok ? 'var(--muted)' : 'var(--warn)';
+    el.textContent  = `ucs/cs = ${ratio}%  ${ok ? '✓' : '⚠ recommended ≤ 75% to avoid seam artifacts (UNet)'}`;
+  } else {
+    el.textContent = '';
+  }
+}
+
+async function saveSettings() {
+  // Capture old suffixes before saving
+  const oldFolderSuffix = settings.folder_suffix || '_nind';
+  const oldFileSuffix   = settings.file_suffix   || '_nindimg';
+  const newFolderSuffix = document.getElementById('folder-suffix').value;
+  const newFileSuffix   = document.getElementById('file-suffix').value;
+
+  settings = await fetch('/api/settings', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(_buildSettingsPayload())
+  }).then(r => r.json());
+  applySettings();
+
+  // If either suffix changed, rename existing output folders/files to match
+  const folderChanged = oldFolderSuffix !== newFolderSuffix;
+  const fileChanged   = oldFileSuffix   !== newFileSuffix;
+  if (folderChanged || fileChanged) {
+    const r = await fetch('/api/rename_suffixes', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        old_folder_suffix: folderChanged ? oldFolderSuffix : '',
+        new_folder_suffix: folderChanged ? newFolderSuffix : oldFolderSuffix,
+        old_file_suffix:   fileChanged   ? oldFileSuffix   : '',
+        new_file_suffix:   fileChanged   ? newFileSuffix   : oldFileSuffix,
+      })
+    }).then(r => r.json());
+    if (r.error) {
+      toast('⚠ ' + r.error);
+    } else {
+      toast(`Settings saved — renamed ${r.renamed_folders} folder(s), ${r.renamed_files} file(s)`);
+    }
+  } else {
+    toast('Settings saved');
+  }
+
+  autoGenerate();
+  refreshTree();
+}
+async function saveSettingsQuiet() {
+  // Save to disk without toast — used when model/network/device changes automatically
+  settings = await fetch('/api/settings', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(_buildSettingsPayload())
+  }).then(r => r.json());
+  autoGenerate();
+}
+
+// ── Networks ──────────────────────────────────────────────────────────────
+function renderNetworkTags() {
+  const nets   = settings.networks        || ['UNet'];
+  const locked = settings.locked_networks || ['UNet'];
+  const cur    = settings.network         || locked[0] || 'UNet';
+  const el     = document.getElementById('network-tags');
+  el.innerHTML = '';
+  nets.forEach(n => {
+    const isLocked = locked.includes(n);
+    const tag = document.createElement('div');
+    tag.className = 'ntag' + (isLocked ? ' unet-locked' : '') + (n === cur ? ' active' : '');
+    if (isLocked) {
+      tag.innerHTML = `<span onclick="selectNetwork('${n}')">${n}</span><span class="nlock">🔒</span>`;
+    } else {
+      tag.innerHTML = `<span onclick="selectNetwork('${n}')">${n}</span>` +
+        `<span class="ndel" onclick="removeNetwork('${n}')">✕</span>`;
+    }
+    el.appendChild(tag);
+  });
+}
+function selectNetwork(n) { if (locked) return; settings.network = n; renderNetworkTags(); _applyNetworkTileDefaults(n); saveSettingsQuiet(); }
+function addNetwork() {
+  if (locked) return;
+  const v      = document.getElementById('new-net').value.trim();
+  const locked = settings.locked_networks || ['UNet'];
+  if (!v) return;
+  if (locked.includes(v)) { toast(`"${v}" is a built-in locked profile and cannot be re-added.`); return; }
+  settings.networks = settings.networks || locked.slice();
+  if (settings.networks.includes(v)) { toast(`"${v}" already exists.`); return; }
+  settings.networks.push(v);
+  document.getElementById('new-net').value = '';
+  renderNetworkTags();
+  autoGenerate();
+}
+function removeNetwork(n) {
+  if (locked) return;
+  const lockedNets = settings.locked_networks || ['UNet'];
+  if (lockedNets.includes(n)) return;
+  settings.networks = (settings.networks || []).filter(x => x !== n);
+  if (settings.network === n) settings.network = lockedNets[0] || 'UNet';
+  renderNetworkTags();
+  autoGenerate();
+}
+
+// ── Models ────────────────────────────────────────────────────────────────
+async function loadModels() {
+  const models = await fetch('/api/models').then(r => r.json());
+  const sel = document.getElementById('model-sel');
+  sel.innerHTML = '<option value="">-- none selected (required) --</option>';
+  models.forEach(m => {
+    const o = document.createElement('option');
+    o.value           = m.full_path;
+    o.dataset.host    = m.host_path;
+    o.dataset.network = m.network || '';
+    o.dataset.folder  = m.folder  || '';
+    o.dataset.originalRel    = m.original_rel    || '';
+    o.dataset.originalFolder = m.original_folder || '';
+    o.dataset.overrideFolder = m.override_folder || '';
+    o.textContent     = m.name;
+    sel.appendChild(o);
+  });
+  // Restore previously saved selection
+  if (settings.model_path) sel.value = settings.model_path;
+  // Sync path/hint fields on load
+  const chosen = sel.options[sel.selectedIndex];
+  if (chosen && chosen.value) {
+    document.getElementById('model-path').value = chosen.dataset.host || chosen.value;
+    _updateModelHints(chosen);
+    _updateOverrideSection(chosen);
+  }
+}
+function _updateModelHints(chosen) {
+  const hintEl    = document.getElementById('model-folder-hint');
+  const netWarn   = document.getElementById('model-network-warn');
+  if (!chosen || !chosen.value) {
+    hintEl.style.display = 'none';
+    netWarn.classList.remove('show');
+    return;
+  }
+  // Show folder name as hint
+  const folder = chosen.dataset.folder || '';
+  if (folder) {
+    hintEl.textContent  = '📁 ' + folder;
+    hintEl.style.display = 'block';
+  } else {
+    hintEl.style.display = 'none';
+  }
+  // If folder encodes a network, warn if it differs from current selection
+  const parsedNet = chosen.dataset.network || '';
+  if (parsedNet && parsedNet !== settings.network) {
+    netWarn.textContent = `⚠ This model requires --network ${parsedNet} but ${settings.network} is selected. Auto-applying ${parsedNet}.`;
+    netWarn.classList.add('show');
+  } else {
+    netWarn.classList.remove('show');
+  }
+}
+
+// ── Folder Override ───────────────────────────────────────────────────────────
+
+let _currentOriginalRel = '';   // stable key for the currently selected model
+
+function _updateOverrideSection(chosen) {
+  const indicator = document.getElementById('ovr-indicator');
+
+  if (!chosen || !chosen.value) {
+    _currentOriginalRel = '';
+    // Clear fields when no model selected
+    document.getElementById('override-current-folder').value = '';
+    document.getElementById('override-name-input').value     = '';
+    document.getElementById('btn-clear-override').style.display = 'none';
+    document.getElementById('override-status-msg').innerHTML  = '';
+    indicator.style.display = 'none';
+    return;
+  }
+
+  _currentOriginalRel  = chosen.dataset.originalRel    || '';
+  const overrideFolder = chosen.dataset.overrideFolder || '';
+  const currentFolder  = chosen.dataset.folder         || '';
+  const originalFolder = chosen.dataset.originalFolder || currentFolder;
+
+  document.getElementById('override-current-folder').value = currentFolder;
+  document.getElementById('override-name-input').value     = overrideFolder;
+
+  const clearBtn = document.getElementById('btn-clear-override');
+  clearBtn.style.display = overrideFolder ? 'inline-flex' : 'none';
+
+  const statusEl = document.getElementById('override-status-msg');
+  if (overrideFolder) {
+    statusEl.innerHTML =
+      `<span style="color:var(--accent)">✓ Override active — originally: </span>` +
+      `<span style="color:var(--warn)">${originalFolder}</span>`;
+    // Show "OVERRIDE ACTIVE" badge in header and auto-open panel so user notices
+    indicator.style.display = '';
+  } else {
+    statusEl.innerHTML =
+      `<span style="color:var(--muted)">No override. Type a name above and click Apply Rename.</span>`;
+    indicator.style.display = 'none';
+  }
+}
+
+async function applyOverride() {
+  const name = document.getElementById('override-name-input').value.trim();
+  if (!name)               { toast('Enter a folder name override'); return; }
+  if (!_currentOriginalRel){ toast('Select a model first'); return; }
+
+  const r = await fetch('/api/model_overrides/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original_rel: _currentOriginalRel, override_name: name })
+  }).then(r => r.json());
+
+  if (r.error) { toast('⚠ ' + r.error); return; }
+  toast(`Folder renamed → ${name}`);
+  await _reloadModelsKeepSelection(_currentOriginalRel);
+  autoGenerate();
+}
+
+async function clearOverride() {
+  if (!_currentOriginalRel) return;
+
+  const r = await fetch('/api/model_overrides/clear', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original_rel: _currentOriginalRel })
+  }).then(r => r.json());
+
+  if (r.error) { toast('⚠ ' + r.error); return; }
+  toast('Override cleared — folder reverted to original name');
+  await _reloadModelsKeepSelection(_currentOriginalRel);
+  autoGenerate();
+}
+
+async function _reloadModelsKeepSelection(originalRel) {
+  await loadModels();
+  const sel = document.getElementById('model-sel');
+  for (const opt of sel.options) {
+    if (opt.dataset.originalRel === originalRel) {
+      sel.value = opt.value;
+      onModelChange();
+      return;
+    }
+  }
+  // Fallback: match by filename
+  const filename = originalRel.split('/').pop();
+  for (const opt of sel.options) {
+    if (opt.textContent === filename) {
+      sel.value = opt.value;
+      onModelChange();
+      return;
+    }
+  }
+}
+
+function onModelChange() {
+  const sel    = document.getElementById('model-sel');
+  const chosen = sel.options[sel.selectedIndex];
+  // Show the Windows-visible host path in the read-only field
+  document.getElementById('model-path').value = chosen ? (chosen.dataset.host || '') : '';
+  // Store the container full path for the actual command
+  settings.model_path = chosen ? chosen.value : '';
+  // Auto-apply the network encoded in the folder name
+  const parsedNet = chosen ? (chosen.dataset.network || '') : '';
+  if (parsedNet) {
+    // Add to networks list if not present, then select it
+    if (!settings.networks.includes(parsedNet)) settings.networks.push(parsedNet);
+    settings.network = parsedNet;
+    renderNetworkTags();
+    _applyNetworkTileDefaults(parsedNet);
+  }
+  // Update folder hint and network mismatch warning
+  _updateModelHints(chosen);
+  // Update folder override section
+  _updateOverrideSection(chosen);
+  // Show/hide no-model warning
+  document.getElementById('model-warn').classList.toggle('show', !settings.model_path);
+  // Save to disk immediately so /api/generate uses the correct model_path + network
+  saveSettingsQuiet();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SELECTOR SELECTION SYNC
+//  Persists selFiles/selDirs to server and broadcasts to all clients via
+//  /sync namespace. On connect, the server pushes current selection back.
+//  On tree refresh, stale selections (deleted files) are pruned automatically.
+// ════════════════════════════════════════════════════════════════════════════
+let _selSyncTimer = null;
+let _applyingRemoteSel = false;   // guard: don't re-broadcast received state
+
+function _broadcastSelIfNeeded() {
+  // Debounce so rapid checkbox clicks only fire one network call
+  clearTimeout(_selSyncTimer);
+  _selSyncTimer = setTimeout(_doSyncSel, 150);
+}
+
+async function _doSyncSel() {
+  try {
+    await fetch('/api/selection', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ files: [...selFiles], dirs: [...selDirs] })
+    });
+    // Broadcast happens server-side after save
+  } catch (_) {}
+}
+
+// Called by the /sync 'selection_updated' event — apply remote state if
+// it differs from local (avoids echo-back fighting)
+function _applyRemoteSel(data) {
+  if (_applyingRemoteSel) return;
+  const newFiles = new Set(data.files || []);
+  const newDirs  = new Set(data.dirs  || []);
+  // Only apply if different
+  const same = newFiles.size === selFiles.size &&
+               [...newFiles].every(r => selFiles.has(r)) &&
+               newDirs.size === selDirs.size &&
+               [...newDirs].every(r => selDirs.has(r));
+  if (same) return;
+  _applyingRemoteSel = true;
+  selFiles = newFiles;
+  selDirs  = newDirs;
+  _normalizeCoverage();   // ensure coverage is consistent after remote sync
+  refreshTree();
+  autoGenerate();
+  _applyingRemoteSel = false;
+}
+
+// Prune selFiles/selDirs against the current available tree.
+// Called after every tree refresh to clean up deleted files.
+function _pruneSelectionToTree() {
+  if (!treeData.input) return;
+
+  // Build a flat Set of all available file rels in the current input tree.
+  const available = new Set();
+  function w(n) {
+    for (const f of (n.files    || [])) available.add(f.rel);
+    for (const c of (n.children || [])) w(c);
+  }
+  w(treeData.input);
+
+  // Pre-build a sorted array once for prefix checks (used for dirs only).
+  // This is O(files) once rather than O(dirs × files) with spread-inside-loop.
+  const availArr = [...available];
+
+  let changed = false;
+  for (const r of [...selFiles]) {
+    if (!available.has(r)) { selFiles.delete(r); changed = true; }
+  }
+  for (const d of [...selDirs]) {
+    const prefix   = d + '/';
+    const hasFiles = available.has(d) || availArr.some(r => r.startsWith(prefix));
+    if (!hasFiles) { selDirs.delete(d); changed = true; }
+  }
+  if (changed) _broadcastSelIfNeeded();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  COMMAND GENERATION (auto on every selection change)
+// ════════════════════════════════════════════════════════════════════════════
+let _genTimer = null;
+function autoGenerate() {
+  clearTimeout(_genTimer);
+  _genTimer = setTimeout(doGenerate, 300);   // debounce 300ms
+}
+
+async function doGenerate() {
+  // Always POST to /api/generate — even with an empty selection.
+  // This ensures commands.json is saved as [] on disk when the user
+  // deselects everything. The previous early-return only updated the
+  // visual list but left stale commands persisted, which reappeared
+  // on tab switch or page refresh.
+  const [res, hist] = await Promise.all([
+    fetch('/api/generate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ selected: [...selFiles] })
+    }).then(r => r.json()),
+    fetch('/api/commands/history').then(r => r.json()).catch(() => []),
+  ]);
+  renderCmds(res.commands, hist);
+  updateSelStats();
+}
+
+async function clearCmds() {
+  if (locked) { toast('Worker is running'); return; }
+  await fetch('/api/commands/clear', { method: 'POST' });
+  // Also clear file selection so checkboxes match the now-empty queue
+  selFiles.clear();
+  selDirs.clear();
+  renderCmds([], _lastHistory);
+  refreshTree();      // re-renders sel tree with all checkboxes unchecked
+  updateSelStats();   // zeroes the Sel / IMG / Skipped counters
+  toast('Commands and selection cleared');
+}
+
+async function clearHistory() {
+  await fetch('/api/commands/history', { method: 'DELETE' });
+  _pollCmds();   // re-render without the history section
+  toast('History cleared');
+}
+
+function renderCmds(cmds, historyCmds) {
+  const el = document.getElementById('cmd-list');
+
+  // Counts for header
+  const pending = cmds.filter(c => !c.status || c.status === 'pending').length;
+  const running = cmds.filter(c => c.status === 'running').length;
+  const done    = cmds.filter(c => c.status === 'done').length;
+  const failed  = cmds.filter(c => c.status === 'failed').length;
+
+  let headerParts = [`${cmds.length} command(s)`];
+  if (running)        headerParts.push(`<span style="color:var(--blue)">${running} running</span>`);
+  if (done + failed)  headerParts.push(`<span style="color:var(--accent)">${done} done</span>` +
+                                        (failed ? ` / <span style="color:var(--danger)">${failed} failed</span>` : ''));
+  if (pending && (running || done + failed))
+                      headerParts.push(`<span style="color:var(--muted)">${pending} pending</span>`);
+  document.getElementById('cmd-count').innerHTML = headerParts.join(' · ');
+
+  el.innerHTML = '';
+  if (!cmds.length && !(historyCmds && historyCmds.length)) {
+    el.innerHTML = '<div class="tree-empty">Select supported image files to generate commands.</div>';
+    return;
+  }
+
+  // Current queue
+  cmds.forEach((c, i) => {
+    const div = document.createElement('div');
+    div.className = 'cmd-item';
+    const st = c.status || 'pending';
+    div.innerHTML = `
+      <div class="cmd-fname">
+        <span style="color:var(--muted);font-size:10px">#${i+1}</span>
+        <span class="cmd-status-pill st-${st}">${st.toUpperCase()}</span>
+        ${c.input ? c.input.split('/').pop() : ''}
+      </div>
+      <div class="cmd-str">${c.cmdstr || ''}</div>`;
+    el.appendChild(div);
+  });
+
+  // Previous session history — shown only when current queue exists and history is non-empty
+  if (historyCmds && historyCmds.length) {
+    const hdr = document.createElement('div');
+    hdr.className = 'cmd-history-hdr';
+    const hDone    = historyCmds.filter(c => c.status === 'done').length;
+    const hFailed  = historyCmds.filter(c => c.status === 'failed').length;
+    const hSkipped = historyCmds.filter(c => c.status === 'skipped').length;
+    hdr.innerHTML = `◷ PREVIOUS SESSION &nbsp;<span>${historyCmds.length} cmd · ${hDone} done · ${hFailed} failed · ${hSkipped} skipped</span>` +
+      `<div style="flex:1"></div>` +
+      `<button class="btn btn-d" style="font-size:9px;padding:2px 7px" onclick="clearHistory()">✕ Clear</button>`;
+    el.appendChild(hdr);
+    historyCmds.forEach((c, i) => {
+      const div = document.createElement('div');
+      div.className = 'cmd-item';
+      div.style.opacity = '0.55';
+      const st = c.status || 'done';
+      div.innerHTML = `
+        <div class="cmd-fname">
+          <span style="color:var(--muted);font-size:10px">#${i+1}</span>
+          <span class="cmd-status-pill st-${st}">${st.toUpperCase()}</span>
+          ${c.input ? c.input.split('/').pop() : ''}
+        </div>
+        <div class="cmd-str">${c.cmdstr || ''}</div>`;
+      el.appendChild(div);
+    });
+  }
+}
+
+// ── Command status polling ────────────────────────────────────────────────
+// _pollCmds is called both by the always-on setInterval in init() and
+// on-demand (tab switch, session complete, etc.) so the selector queue
+// always reflects the latest running/done/failed statuses.
+async function _pollCmds() {
+  const [cmds, hist] = await Promise.all([
+    fetch('/api/commands').then(r => r.json()).catch(() => []),
+    fetch('/api/commands/history').then(r => r.json()).catch(() => []),
+  ]);
+  _lastHistory = hist;   // cache for use by instant commands_updated events
+  renderCmds(cmds, hist);
+  // Also keep Worker tab count fresh
+  const pending = cmds.filter(c => c.status === 'pending').length;
+  document.getElementById('wk-cmd-count').textContent =
+    `${pending} pending / ${cmds.length} total`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  WORKER (App 3) — SocketIO
+// ════════════════════════════════════════════════════════════════════════════
+const socket = io('/worker');
+
+socket.on('connect',         ()  => { loadWkCommands(); });
+socket.on('worker_update',   (d) => { onWorkerUpdate(d); });
+socket.on('session_complete',(r) => { showReport(r); });
+socket.on('terminal_line',   (d) => { appendTerminal(d.worker_id, d.text); });
+socket.on('error',           (e) => { toast('⚠ ' + e.msg); });
+
+// ── /sync — multi-client real-time synchronisation ────────────────────────
+// Every browser on the LAN connects here. The server pushes events whenever
+// any client changes shared state: commands, settings, files, history.
+// Polling stays as fallback; push gives near-instant cross-device updates.
+const syncSocket = io('/sync');
+
+syncSocket.on('connect', () => {
+  // Server will immediately push current state on connect — no extra fetch needed.
+});
+
+syncSocket.on('clients_count', d => {
+  const n = d.count;
+  document.getElementById('clients-count').textContent = n;
+  const badge = document.getElementById('clients-badge');
+  badge.classList.toggle('multi', n > 1);
+  badge.title = n === 1 ? '1 client connected' : `${n} clients connected`;
+});
+
+syncSocket.on('commands_updated', d => {
+  // Another client generated/cleared/progressed commands — update queue immediately.
+  // Use cached history so we don't need an extra fetch.
+  renderCmds(d.commands || [], _lastHistory);
+  const pending = (d.commands || []).filter(c => c.status === 'pending').length;
+  document.getElementById('wk-cmd-count').textContent =
+    `${pending} pending / ${(d.commands || []).length} total`;
+});
+
+syncSocket.on('history_updated', () => {
+  // Another client finished a session — re-poll to get the new history.
+  _pollCmds();
+});
+
+syncSocket.on('tree_updated', () => {
+  // Another client uploaded/deleted/renamed files — refresh the file tree.
+  refreshTree();
+});
+
+syncSocket.on('settings_updated', d => {
+  // Another client saved settings — apply them locally without overwriting
+  // in-progress local changes (we only apply if we're not the sender).
+  // Since the server echoes to ALL clients including sender, skip if the
+  // stored settings already match (avoids fighting with the user mid-edit).
+  const newStr = JSON.stringify(d);
+  const curStr = JSON.stringify(settings);
+  if (newStr !== curStr) {
+    settings = d;
+    applySettings();
+  }
+});
+
+syncSocket.on('selection_updated', d => {
+  // Another client changed the selector selection — apply it locally.
+  _applyRemoteSel(d);
+});
+
+// ── Tab-close / navigation: cancel all active local upload batches ────────────
+// `pagehide` fires reliably on tab close, refresh, and navigation in all modern
+// browsers including mobile. `beforeunload` is a belt-and-suspenders fallback.
+// `sendBeacon` is the only API guaranteed to complete during page teardown —
+// XHR/fetch are cancelled by the browser before they can reach the server.
+function _xferBeaconCancelAll() {
+  const ids = Object.values(_xfer.batches)
+    .filter(b => b.phase === 'active' && !b.isRemote && b.serverBatchId)
+    .map(b => b.serverBatchId);
+  if (!ids.length) return;
+  const blob = new Blob([JSON.stringify({ batch_ids: ids })], { type: 'application/json' });
+  navigator.sendBeacon('/api/upload_cancel_all', blob);
+}
+window.addEventListener('pagehide',    _xferBeaconCancelAll);
+window.addEventListener('beforeunload', _xferBeaconCancelAll);
+
+// ── Transfer sync events ──────────────────────────────────────────────────
+syncSocket.on('upload_batch_start',  d => _xferOnUploadBatchStart(d));
+syncSocket.on('upload_file_done',    d => _xferOnUploadFileDone(d));
+syncSocket.on('upload_file_cancel',  d => _xferOnUploadFileCancel(d));
+syncSocket.on('upload_batch_cancel', d => _xferOnUploadBatchCancel(d));
+
+// ── State ─────────────────────────────────────────────────────────────────
+let termEnabled = false;                 // driven by the process log checkbox
+let _termLog    = {};                    // { workerId: [{text, cls}, …] }
+let _sessionActive = false;
+let _lastHistory   = [];                 // cached previous-session commands for instant re-render
+
+// ── Slot builder ──────────────────────────────────────────────────────────
+// Creates a fresh idle slot for worker number n (1-based).
+function _makeSlot(n) {
+  const id   = String(n);
+  const slot = document.createElement('div');
+  slot.className   = 'wslot' + (termEnabled ? ' has-term' : '');
+  slot.dataset.wid = id;
+
+  slot.innerHTML = `
+    <div class="wcard idle" id="wcard-${id}">
+      <div class="wcard-title">
+        <h3>WORKER ${n}</h3>
+        <span class="wbadge wb-idle" id="wbadge-${id}">IDLE</span>
+        <div class="spacer"></div>
+        <span id="wcnt-${id}" style="font-size:11px;color:var(--muted)">—</span>
+      </div>
+      <div class="wcard-prog"><div class="wcard-progf" id="wprog-${id}" style="width:0%"></div></div>
+      <div class="wstats">
+        <div class="wstat"><div class="wstat-lbl">ELAPSED</div>    <div class="wstat-val" id="we-${id}">—</div></div>
+        <div class="wstat"><div class="wstat-lbl">CURRENT FILE</div><div class="wstat-val" id="wc-${id}">—</div></div>
+        <div class="wstat"><div class="wstat-lbl">PREVIOUS FILE</div><div class="wstat-val" id="wp-${id}">—</div></div>
+        <div class="wstat"><div class="wstat-lbl">AVG / FILE</div> <div class="wstat-val" id="wa-${id}">—</div></div>
+      </div>
+      <div class="wcurrent" id="wfile-${id}"></div>
+    </div>
+    <div class="wslot-term ${termEnabled ? 'visible' : ''}" id="wterm-${id}">
+      <div class="wslot-term-hdr">
+        <span>◈ LOG — WORKER ${n}</span>
+        <div class="spacer"></div>
+        <button class="btn" style="font-size:10px;padding:2px 7px"
+                onclick="clearWorkerLog('${id}')">Clear</button>
+      </div>
+      <div class="wslot-term-body" id="wlog-${id}"></div>
+    </div>`;
+  return slot;
+}
+
+// Rebuild the grid whenever num-workers changes (preview) or on session start.
+// Also populates _slotEls cache so onWorkerUpdate avoids repeated getElementById.
+let _slotEls = {};   // { workerId: { card, badge, bar, cnt, e, c, p, a, f } }
+
+function buildSlots(n) {
+  const grid = document.getElementById('workers-grid');
+  grid.innerHTML = '';
+  _termLog  = {};
+  _slotEls  = {};
+  for (let i = 1; i <= n; i++) {
+    grid.appendChild(_makeSlot(i));
+    const id = String(i);
+    _slotEls[id] = {
+      card:  document.getElementById('wcard-'  + id),
+      badge: document.getElementById('wbadge-' + id),
+      bar:   document.getElementById('wprog-'  + id),
+      cnt:   document.getElementById('wcnt-'   + id),
+      e:     document.getElementById('we-'     + id),
+      c:     document.getElementById('wc-'     + id),
+      p:     document.getElementById('wp-'     + id),
+      a:     document.getElementById('wa-'     + id),
+      f:     document.getElementById('wfile-'  + id),
+    };
+  }
+}
+
+// ── num-workers input ─────────────────────────────────────────────────────
+function onWorkersInput(val) {
+  const n = Math.max(1, Math.min(16, parseInt(val) || 1));
+  if (!_sessionActive) buildSlots(n);
+}
+
+// ── Process log toggle ────────────────────────────────────────────────────
+function onTermToggle(on) {
+  termEnabled = on;
+  document.querySelectorAll('.wslot').forEach(slot => {
+    slot.classList.toggle('has-term', on);
+    const term = slot.querySelector('.wslot-term');
+    if (term) term.classList.toggle('visible', on);
+  });
+}
+
+// ── Start / Cancel ────────────────────────────────────────────────────────
+function startWorker() {
+  if (!settings.model_path) {
+    if (!confirm('⚠ --model_path is required by denoise_image.py.\n\nNo model is selected — the command will likely fail.\n\nContinue anyway?')) return;
+  }
+  const nw  = Math.max(1, parseInt(document.getElementById('num-workers').value) || 1);
+  const ow  = document.getElementById('chk-overwrite').checked;
+
+  // Single atomic emit — server saves overwrite to settings.json and broadcasts
+  // the winning config back in worker_update so every tab syncs immediately.
+  // The old pattern of a separate fetch('/api/settings') + socket.emit('start')
+  // had no ordering guarantee and could cause workers to read stale overwrite state.
+  socket.emit('start', { workers: nw, overwrite: ow });
+}
+function cancelWorker() { socket.emit('cancel'); }
+
+// ── Load pending count (Worker tab header) ────────────────────────────────
+async function loadWkCommands() {
+  const cmds = await fetch('/api/commands').then(r => r.json()).catch(() => []);
+  const pending = cmds.filter(c => c.status === 'pending').length;
+  document.getElementById('wk-cmd-count').textContent =
+    `${pending} pending / ${cmds.length} total`;
+}
+
+// ── Update worker stats in-place (never rebuilds terminal) ────────────────
+function onWorkerUpdate(data) {
+  // ── Sync MAX_WORKERS cap from server ──────────────────────────────────────
+  if (data.max_workers) {
+    const el = document.getElementById('num-workers');
+    if (el) {
+      el.max = data.max_workers;
+      if (parseInt(el.value) > data.max_workers) el.value = data.max_workers;
+    }
+  }
+
+  // ── Apply winning start config to ALL tabs ────────────────────────────────
+  // worker_config is set by the tab that pressed START (or the server on
+  // reconnect) and is empty {} when idle.  We apply it on every update while
+  // running so any tab that connects mid-session also gets the right values.
+  const cfg = data.worker_config;
+  if (cfg && Object.keys(cfg).length > 0) {
+    const nwEl = document.getElementById('num-workers');
+    const owEl = document.getElementById('chk-overwrite');
+    const plEl = document.getElementById('chk-debug');
+    if (nwEl && cfg.num_workers != null) nwEl.value   = cfg.num_workers;
+    if (owEl && cfg.overwrite   != null) owEl.checked = cfg.overwrite;
+  }
+
+  const running = data.running;
+  const serverWorkerCount = data.workers ? data.workers.length : 0;
+
+  // ── Grid sync — ALL clients rebuild from server state ─────────────────────
+  // This is the single place buildSlots is called. Any client — whether it
+  // pressed Start or not — rebuilds the grid when:
+  //   (a) a session just started (running=true) and the grid size differs, or
+  //   (b) the server says running but _sessionActive was false (another device
+  //       started the session while this tab was open).
+  if (running && serverWorkerCount > 0) {
+    const currentSlots = document.querySelectorAll('.wslot').length;
+    if (currentSlots !== serverWorkerCount) {
+      buildSlots(serverWorkerCount);
+    }
+    if (!_sessionActive) _sessionActive = true;
+  }
+
+  // ── Idle guard — only skip card updates when truly idle on ALL sides ──────
+  // Use server's running flag as ground truth. If server is not running and
+  // this client never started a session (_sessionActive=false), there is no
+  // live session to show — return after VRAM update only.
+  // Note: _sessionActive stays true until showReport() clears it, so the DONE
+  // state is still visible after a session ends normally.
+  if (!running && !_sessionActive) {
+    updateVram(data.vram, data.ram);
+    return;
+  }
+
+  applyLock(running);
+  document.getElementById('btn-cancel').disabled = !running;
+
+  const pill = document.getElementById('sess-pill');
+  pill.textContent = running ? 'RUNNING' : _sessionActive ? 'DONE' : 'IDLE';
+  pill.className   = 'session-pill ' +
+    (running ? 'sp-running' : _sessionActive ? 'sp-done' : 'sp-idle');
+
+  updateVram(data.vram, data.ram);
+
+  if (!data.workers) return;
+  data.workers.forEach(w => {
+    const id  = String(w.id);
+    const els = _slotEls[id];
+    if (!els) return;
+    const pct = w.total > 0 ? Math.round(w.completed / w.total * 100) : 0;
+
+    els.card.className    = `wcard ${w.status}`;
+    els.badge.className   = `wbadge wb-${w.status}`;
+    els.badge.textContent = w.status.toUpperCase();
+    els.bar.style.width   = pct + '%';
+    els.cnt.textContent   = `${w.completed}/${w.total}`;
+    els.e.textContent     = w.elapsed      + 's';
+    els.c.textContent     = w.current_time + 's';
+    els.p.textContent     = w.prev_time    + 's';
+    els.a.textContent     = w.avg_time     + 's';
+    els.f.textContent     = w.current_file ? '⟳ ' + w.current_file : '';
+  });
+}
+
+function updateVram(vram, ram) {
+  const vbar = document.getElementById('vram-bar');
+
+  // ── VRAM section ──────────────────────────────────────────────────────────
+  let html = '<span style="font-size:10px;color:var(--muted);letter-spacing:1px">VRAM</span>';
+  if (vram && vram.length) {
+    vram.forEach(g => {
+      html += `
+        <div class="vram-item">
+          <span class="vram-name">GPU${g.index} ${g.name}</span>
+          <div class="vram-track"><div class="vram-fill" style="width:${g.pct}%"></div></div>
+          <span class="vram-val">${g.used_mb} / ${g.total_mb} MB (${g.pct}%)</span>
+        </div>`;
+    });
+  } else {
+    html += '<span style="font-size:11px;color:var(--muted)">No GPU detected</span>';
+  }
+
+  // ── Divider ───────────────────────────────────────────────────────────────
+  html += '<div class="vram-divider"></div>';
+
+  // ── RAM section ───────────────────────────────────────────────────────────
+  html += '<span style="font-size:10px;color:var(--muted);letter-spacing:1px">RAM</span>';
+  if (ram && ram.total_mb) {
+    html += `
+      <div class="vram-item">
+        <span class="vram-name">System</span>
+        <div class="vram-track"><div class="vram-fill ram" style="width:${ram.pct}%"></div></div>
+        <span class="vram-val">${ram.used_mb} / ${ram.total_mb} MB (${ram.pct}%)</span>
+      </div>`;
+  } else {
+    html += '<span style="font-size:11px;color:var(--muted)">—</span>';
+  }
+
+  vbar.innerHTML = html;
+}
+
+// ── Terminal ──────────────────────────────────────────────────────────────
+function appendTerminal(workerId, text) {
+  const id = String(workerId);
+  if (!_termLog[id]) _termLog[id] = [];
+
+  const lo  = text.toLowerCase();
+  const cls = lo.includes('error') || lo.includes('traceback') || lo.startsWith('err') ? 'err'
+            : lo.includes('warning') || lo.includes('warn')                            ? 'info'
+            : lo.includes('saving')  || lo.includes('done') || lo.includes('success')  ? 'ok'
+            : lo.startsWith('debug')                                                    ? 'dbg'
+            : '';
+  _termLog[id].push({ text, cls });
+
+  const body = document.getElementById('wlog-' + id);
+  if (!body) return;
+  const line = document.createElement('div');
+  line.className   = 'term-line' + (cls ? ' ' + cls : '');
+  line.textContent = text;
+  body.appendChild(line);
+  // Scroll after paint so scrollHeight is settled
+  requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
+}
+
+function clearWorkerLog(id) {
+  _termLog[id] = [];
+  const body = document.getElementById('wlog-' + id);
+  if (body) body.innerHTML = '';
+}
+
+// ── Report ────────────────────────────────────────────────────────────────
+function showReport(r) {
+  _sessionActive = false;
+  const pill = document.getElementById('sess-pill');
+  pill.textContent = 'DONE'; pill.className = 'session-pill sp-done';
+  document.getElementById('report-grid').innerHTML = `
+    <div class="rstat"><div class="rstat-val">${r.total_completed}</div><div class="rstat-lbl">COMPLETED</div></div>
+    <div class="rstat"><div class="rstat-val">${r.total_failed}</div>   <div class="rstat-lbl">FAILED</div></div>
+    <div class="rstat"><div class="rstat-val">${r.total_skipped}</div>  <div class="rstat-lbl">SKIPPED</div></div>
+    <div class="rstat"><div class="rstat-val">${r.mean_time}s</div>    <div class="rstat-lbl">MEAN / FILE</div></div>
+    <div class="rstat"><div class="rstat-val">${r.throughput}s</div>   <div class="rstat-lbl">THROUGHPUT</div></div>
+    <div class="rstat"><div class="rstat-val">${r.session_time}s</div> <div class="rstat-lbl">SESSION TIME</div></div>`;
+  applyLock(false);                 // unlock everything
+  document.getElementById('btn-cancel').disabled = true;
+  // Final refresh of the selector command queue to show all done/failed statuses
+  _pollCmds();
+  loadWkCommands();
+  refreshTree();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  UTILITIES
+// ════════════════════════════════════════════════════════════════════════════
+function fmtBytes(n) {
+  if (!n) return '';
+  for (const u of ['B','KB','MB','GB']) { if (n < 1024) return n.toFixed(1)+' '+u; n /= 1024; }
+  return n.toFixed(1)+' TB';
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+buildSlots(1);
+init();
+</script>
+</body>
+</html>
