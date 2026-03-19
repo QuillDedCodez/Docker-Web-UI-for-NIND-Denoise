@@ -95,7 +95,7 @@ See [Hardware Requirements](#hardware-requirements) for VRAM and RAM guidance.
 
 ```bash
 # 1. Clone this repository
-git clone https://github.com/your-username/nind-denoise-manager.git
+git clone https://github.com/QuillDedCodez/Docker-Web-UI-for-NIND-Denoise.git
 cd nind-denoise-manager
 
 # 2. Place your downloaded model folders inside:
